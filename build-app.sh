@@ -17,7 +17,12 @@ cp Resources/AppIcon.icns "$APP/Contents/Resources/"   # regenerate: see scripts
 # An ad-hoc signature (-) changes on every build, so every rebuild silently invalidates the
 # permissions (System Settings may still show them as on). A fixed certificate keeps them across builds.
 IDENTITY="${SIGN_IDENTITY:-Debrief Dev}"
-if security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
+if [[ "$IDENTITY" == "Developer ID Application"* ]]; then
+  # Release signing (CI): notarization requires the hardened runtime and a secure timestamp.
+  # The entitlement lets the hardened runtime still use the microphone.
+  codesign --force --options runtime --timestamp --entitlements Resources/Debrief.entitlements --sign "$IDENTITY" "$APP"
+  echo "Signed with \"$IDENTITY\" (hardened runtime, ready for notarization)"
+elif security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
   codesign --force --sign "$IDENTITY" "$APP"
   echo "Signed with \"$IDENTITY\" (permissions persist across rebuilds)"
 else
