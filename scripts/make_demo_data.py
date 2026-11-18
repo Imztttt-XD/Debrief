@@ -21,9 +21,9 @@ def app(company, role, status, days, jd=""):
     apps.append(a); return a
 a1 = app("星河示例科技有限公司", "全栈开发工程师（Java / Vue）", "interviewing", 1,
          "岗位职责：\n1. 负责即时通信与支付相关后端服务的设计与开发；\n2. 参与高并发场景下的性能优化。\n任职要求：熟悉 Java、Spring Boot、Kafka、Redis、MySQL。")
-a2 = app("字节跳动", "后端开发实习生", "awaitingResult", 6)
+a2 = app("云帆示例网络", "后端开发实习生", "awaitingResult", 6)
 a3 = app("某某银行金融科技子公司", "Java 开发", "applied", 9)
-a4 = app("Shopee", "Backend Engineer Intern", "rejected", 20)
+a4 = app("Northwind Demo Labs", "Backend Engineer Intern", "rejected", 20)
 dump("applications.json", apps)
 ivs = []
 def iv(app, rnd, hours, fmt="online", dur=60):
@@ -85,7 +85,7 @@ dump("question-bank.json", {"items": [
     bq("从你的项目里挑一个详细讲讲，具体做了什么、解决了哪些问题？", "project", "知序即时通信系统", 2, "review", score=3.3),
     bq("Kafka 如何保证消息不丢失？", "fundamentals", "知序即时通信系统", 2, "mastered", score=4.3),
     bq("请先做一个自我介绍。", "behavioral", None, 4, "mastered", score=4.0),
-    bq("为什么想来我们公司？", "hr", None, 1, "new", company="字节跳动"),
+    bq("为什么想来我们公司？", "hr", None, 1, "new", company="云帆示例网络"),
 ], "ingestedReviews": [rec_id], "ingestedMocks": []})
 os.makedirs(os.path.join(out, "MockInterviews"), exist_ok=True)
 mock_id = U()

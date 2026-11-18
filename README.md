@@ -1,83 +1,61 @@
 # Debrief（面试复盘）
 
+**简体中文** | [English](README.en.md)
+
 <img src="docs/icon.png" width="96" align="right">
 
-macOS 15+ app that helps job seekers review interviews. Today it records an interview or meeting: system audio (Zoom, Teams, the browser) plus your microphone. Each source goes to its own track in a crash-safe file. When you stop, the tracks are mixed down to one `.m4a`.
+写给求职者的 macOS App：录下每一场面试，AI 逐题帮你复盘，把被问过的问题沉淀成题库，再拿来做模拟面试。
 
+![复盘：每道题的评分、纠错和参考回答](docs/screenshots/review-questions.png)
 
-## Build and run
+## 功能
 
-Needs Swift 6 (Command Line Tools are enough, no Xcode required).
+- **录制线上面试。** 腾讯会议、Zoom、Teams、浏览器里的面试都能录。会议声音和你的麦克风分轨保存。录音时有一个小悬浮按钮浮在会议窗口上方，并且会请求系统不把它显示在屏幕共享里。App 崩溃或 Mac 睡眠时，已录的内容会自动保存。
+- **复盘。** 录音转成文字时会区分面试官和你。AI 会找出每一个问题和追问，从准确、结构、深度三方面给你的回答打分，指出事实错误，并且只用你简历里的真实经历写一份参考回答。点击任意一道题，可以直接跳到录音里的那一刻收听。
+- **题库。** 每次复盘的问题自动收进题库。重复的问题会合并并计数（如"被问 ×3"），再根据你最近一次的回答标为"已掌握"或"需复习"。
+- **模拟面试。** AI 面试官根据岗位描述（JD）、你的简历和你真实被问过的问题来出题，会像真人一样追问，结束后用同样的标准给你点评。
+- **岗位与日程。** 记录投递的公司、岗位、JD 和所用的简历版本。安排面试轮次并设置提醒，提醒通知里有"开始录音"按钮，点击后开始录音，录音会自动关联到这场面试。
 
-```sh
-./build-app.sh                       # → build/Debrief.app
-open build/Debrief.app
-swift run RecorderSelfTest           # headless test of write / crash-recovery / mixdown
-```
+| 题库 | 模拟面试（深色模式） | 日程 |
+|---|---|---|
+| ![题库](docs/screenshots/bank.png) | ![模拟面试](docs/screenshots/mock-dark.png) | ![日程](docs/screenshots/schedule.png) |
 
-On the first recording, macOS asks for **Microphone** and **Screen & System Audio Recording** access. After granting screen access, quit and reopen the app. Don't use `swift run Debrief`: without the bundle's Info.plist, macOS kills the process when it asks for the microphone.
+界面语言：简体中文（默认）、繁體中文、English、日本語。
 
-### Keep permissions across rebuilds
+## 安装
 
-macOS ties Microphone and Screen & System Audio Recording permission to the app's code signature. Ad-hoc builds get a new signature every time, so after a rebuild recording fails even though System Settings still shows the app as allowed. To fix it once:
+需要 **macOS 15** 或更高版本。
 
-1. Open Keychain Access → menu Keychain Access → Certificate Assistant → Create a Certificate…
-2. Name: `Debrief Dev`, Identity Type: Self Signed Root, Certificate Type: **Code Signing** → Create.
-3. Rebuild with `./build-app.sh`. It picks up the certificate automatically. Grant permissions once more; after that they stay granted across rebuilds.
+1. 从 [Releases](../../releases) 下载最新的 `Debrief-<版本号>.dmg`，把**面试复盘**拖进"应用程序"文件夹。
+2. 如果 macOS 提示"无法打开"（未经公证的版本会这样）：打开**系统设置 → 隐私与安全性**，滚动到底部，点击**仍要打开**。
+3. 第一次录音时，允许**麦克风**和**屏幕与系统录音**权限。屏幕权限只用来录系统声音，不会保存任何画面。授权后退出 App 再重新打开。
 
-Until then, after each rebuild run `tccutil reset ScreenCapture dev.local.InterviewRecorder` and `tccutil reset Microphone dev.local.InterviewRecorder`, then grant again.
+想自己从源码构建？见 [ARCHITECTURE.md](ARCHITECTURE.md#build-run-test)。
 
-## Behaviour
+## 配置 AI 模型
 
-- Output: `~/Movies/Debrief/Interview-yyyy-MM-dd-HHmmss.m4a` (or `~/Movies/InterviewRecorder/` if it exists from before the rename) (AAC, 48 kHz stereo). The folder can be changed in the window.
-- While recording: `Interview-….inprogress.mov`, flushed every 2 s. If the app crashes, it is recovered into an `.m4a` on the next launch, losing at most about 2 s.
-- Floating record button: always on top, on every Space and over full-screen meeting apps. Click to start/stop, drag to move (position remembered), right-click for a menu. Shows elapsed time and a level ring while recording, and a green check once saved. Clicking doesn't take focus from the meeting window. Show/hide from the main window, the menu bar, or its right-click menu. It asks macOS to leave it out of screen sharing, but check this with your meeting app before relying on it.
-- Sleep, a capture error, or quitting the app stops the recording and saves it.
-- Mic volume in the mix can be adjusted. The raw tracks stay separate until the mixdown.
-- UI languages: 简体中文 (default), 繁體中文, English, 日本語, plus "Follow System". Switch at the bottom of the window; the change applies immediately. System-drawn UI (open panel, permission prompts) follows on the next launch. "Follow System" falls back to Simplified Chinese when the system language isn't supported.
-- A consent dialog appears before the first recording.
+复盘和模拟面试需要 API Key。打开**设置 → 模型服务**：
 
-## App structure
+- **转写**：阿里云百炼（`qwen3-asr-flash`）。
+- **复盘、模拟面试、题库**：默认使用 DeepSeek。任何兼容 OpenAI 接口的服务都可以用（OpenAI、本地 Ollama 等），每个功能可以分别指定不同的模型。
 
-Main window sidebar: **岗位** (applications: company, role, status, JD, resume version, notes) · **录音** · **设置** (模型服务 / 个人资料 / 通用).
+每一项旁边都有**测试**按钮，会用一次极小的真实请求检查 Key 是否可用。Key 保存在 macOS 钥匙串里。
 
-- Data: `~/Library/Application Support/Debrief/` (`applications.json`, `resumes.json`, `profile.json`, `ai-settings.json`, `Resumes/` copies of imported files). If a file can't be read, a copy is kept as `*.unreadable-<time>.json` before the app starts fresh.
-- API keys: login Keychain, service `dev.local.Debrief.api-key`. With ad-hoc builds macOS may ask for your login password the first time a new build reads a key ("Always Allow" stops it until the next rebuild). The `Debrief Dev` certificate above avoids this too.
-- AI providers (default = budget plan): DeepSeek (`deepseek-v4-pro` for review, `deepseek-flash` for mock interviews and the question bank), Alibaba Cloud Model Studio `qwen3-asr-flash` for transcription. Every feature can be pointed at another provider/model in 设置 → 模型服务; "Test" makes one minimal real call.
-- Schedule (日程): month calendar + upcoming/past lists; interviews have round, time, duration, format (online link / address / phone), notes and reminders (1 day, 1 h, 30 min, **10 min** default, 5 min). Reminders are local notifications, delivered even when the app isn't running, with buttons 开始录音 (records, linked to that interview) and 打开会议链接. Scheduling an interview moves its application from 已投递 to 面试中.
-- Recording ↔ interview: a recording is linked to the scheduled interview whose window (30 min before start → 30 min after planned end) contains its start time, closest start first. It can be changed while recording and afterwards (录音 → 录音记录). Index: `recordings.json`.
-- Each recording keeps `Interview-….tracks.mov` next to the `.m4a`: the original per-source tracks (system = interviewer, mic = you) for per-speaker transcription. About 130 MB per hour.
-- Review (复盘), per recording, saved as `Reviews/<recordingID>.json`:
-  1. Transcribe: each track of `.tracks.mov` is decoded to 16 kHz mono and split into speech segments (`RecorderCore/SpeechSegmenter`: energy-based, pauses < 0.8 s merged, ≤ 30 s per segment, silence never sent). Segments go to Qwen-ASR 4 at a time with retries; JD/resume terms are passed as recognition context. Mic lines that duplicate the interviewer (no headphones) are dropped.
-  2. Analyze with the review model (JSON mode): extract questions + follow-ups by transcript line numbers → critique in batches of 4 (corrections, strengths, improvements, a better answer built only from the candidate's real experience, 3 scores) → summary. Line numbers are validated, scores clamped, invalid JSON retried once.
-  3. Every step is saved as it finishes; "继续分析" resumes. Transcript lines can be edited (text and speaker), then 重新分析.
-- Question bank (题库, `question-bank.json`): questions from finished reviews and mock interviews are added automatically. A question whose text is ≥ 55 % similar (character bigrams) to an existing one is merged into it (asked ×N, follow-ups merged). Mastery comes from the latest critique: average ≥ 4 with no corrections → 已掌握, otherwise 需复习. Filter by category / mastery / text; export the filtered list.
-- Mock interview (模拟面试, `MockInterviews/<id>.json`): pick an application (JD + resume), a type and 3–10 main questions. The interviewer model asks one question at a time (JSON turns: question / followUp / end, with category and resume item), follows up 0–2 times, and is seeded with real questions from the bank (same application → same company → same resume item → still to review). The app enforces the question count. "结束并点评" reuses the review critique and summary, then adds the questions to the bank. "导出问题" copies or saves the questions asked so far (main + follow-ups only) in the same Markdown format as review exports.
-- Tests can set `DEBRIEF_TEST_API_KEY` so API calls use that key instead of reading the Keychain (for mock servers).
-- UI snapshots without screen-recording permission: `python3 scripts/make_demo_data.py /tmp/demo <any .m4a>` then `DEBRIEF_DATA_DIR=/tmp/demo DEBRIEF_SNAPSHOT_DIR=/tmp/shots build/Debrief.app/Contents/MacOS/Debrief` renders every page at 900×600, 1300×820 and 1100×720 dark, plus the floating button, and quits (no visible window, no reminders).
-- Visual style: colours and shared card/label/pill styles live in `Sources/Debrief/UI/Theme.swift`, derived from the icon.
-- Tests: set `DEBRIEF_DATA_DIR=/some/scratch/dir` so nothing touches real data (`$HOME` doesn't redirect it).
-- No SwiftData / `@State` / `@Observable`: those need Xcode's macro plugins, which Command Line Tools don't ship. Use `ObservableObject` + `@Published` instead.
+不配置任何 Key 时，录音、日程、岗位管理和题库也都可以正常使用。
 
-## Localization
+## 隐私
 
-All copy lives in one table in `scripts/gen_strings.py`. After editing it, run:
+- 录音只保存在你的 Mac 上，位置是 `~/Movies/Debrief/`。其他数据都在 `~/Library/Application Support/Debrief/`。
+- 开始复盘时，这段录音中有人说话的片段会发给你配置的转写服务；转写文本连同 JD 和简历会发给你配置的复盘模型。模拟面试会把 JD、简历和你输入的回答发给模拟面试模型。静音部分不会上传。除此之外不会向任何地方发送数据，也没有任何统计或埋点。
+- **录音前务必征得对方同意。** 在很多地方，未经同意录音是违法的。第一次录音前，App 会要求你确认这一点。
 
-```sh
-python3 scripts/gen_strings.py Resources   # regenerates Resources/<lang>.lproj/{Localizable,InfoPlist}.strings
-```
+## 悬浮按钮
 
-To add a language, add a column to the table and its code to `L` in the script, to `AppLanguage` / `shippedCodes` in `Sources/Debrief/Localization.swift`, and to `CFBundleLocalizations` in `Resources/Info.plist`. Recording people without their consent is illegal in many places.
+![录音中的悬浮按钮](docs/screenshots/floating-button.png)
 
-## App icon
+单击开始或停止录音，拖动可以移动位置，右键打开更多选项。录音时按钮上显示已录时长和音量圈，保存完成后会出现绿色对勾。点击按钮不会把焦点从会议窗口抢走。它会请求系统不在屏幕共享中显示自己，但正式使用前，请先在你的会议软件里确认一下。
 
-`Resources/AppIcon.icns` comes from `scripts/make_icon.swift`, option **buddy** (a round buddy wearing headphones, lavender → sky blue with pink accents; the app's colours in `UI/Theme.swift` follow it). `swift scripts/make_icon.swift /tmp/icon all` renders all three drafted options plus a comparison sheet. To rebuild the icon:
+## 开发者
 
-```sh
-swift scripts/make_icon.swift /tmp/icon buddy && mkdir -p /tmp/icon/AppIcon.iconset && \
-for s in 16 32 128 256 512; do sips -z $s $s /tmp/icon/AppIcon-buddy-1024.png --out /tmp/icon/AppIcon.iconset/icon_${s}x${s}.png; \
-  sips -z $((s*2)) $((s*2)) /tmp/icon/AppIcon-buddy-1024.png --out /tmp/icon/AppIcon.iconset/icon_${s}x${s}@2x.png; done && \
-iconutil -c icns /tmp/icon/AppIcon.iconset -o Resources/AppIcon.icns
-```
-
-The bundle id stays `dev.local.InterviewRecorder` so settings saved before the rename (language, consent, mic volume) carry over. Change it when you get a real developer account.
+- [ARCHITECTURE.md](ARCHITECTURE.md)：构建、测试、发布，录音和 AI 复盘的实现，数据布局（英文）。
+- [CLAUDE.md](CLAUDE.md)：AI 编程助手在本仓库中的工作规则。
