@@ -7,6 +7,7 @@ struct RecordingView: View {
     @ObservedObject var recorder: Recorder
     @ObservedObject var store: AppStore
     @ObservedObject var nav: NavigationModel
+    @ObservedObject var engine: ReviewEngine
 
     var body: some View {
         ScrollView {
@@ -25,7 +26,7 @@ struct RecordingView: View {
                     }
                 }
 
-                RecordingHistory(store: store, nav: nav)
+                RecordingHistory(store: store, nav: nav, engine: engine)
             }
             .padding(28)
             .frame(maxWidth: 720)
@@ -133,11 +134,9 @@ private struct RecordHero: View {
     @ViewBuilder private var linkInfo: some View {
         let now = Date()
         if recorder.isRecording {
-            Picker(L10n.tr("recording.linkedTo"), selection: $recorder.linkedInterviewID) {
-                Text(L10n.tr("recording.unlinked")).tag(UUID?.none)
-                ForEach(store.interviewsNear(now)) { iv in
-                    Text(InterviewText.pickerLabel(iv, store: store)).tag(Optional(iv.id))
-                }
+            LabeledContent(L10n.tr("recording.linkedTo")) {
+                MenuPicker(title: L10n.tr("recording.linkedTo"), selection: $recorder.linkedInterviewID,
+                           options: InterviewText.linkOptions(near: now, store: store))
             }
             .frame(maxWidth: 460)
         } else if let iv = store.interviewCandidates(at: now).first {
@@ -162,19 +161,22 @@ private struct SourcesCard: View {
                 Toggle(isOn: $recorder.captureSystemAudio) {
                     Label(L10n.tr("source.system"), systemImage: "speaker.wave.2")
                 }
+                .toggleStyle(.brandCheckbox)
                 LevelMeter(level: recorder.systemLevel)
                 Divider()
                 Toggle(isOn: $recorder.captureMicrophone) {
                     Label(L10n.tr("source.microphone"), systemImage: "mic")
                 }
-                Picker(L10n.tr("source.input"), selection: $recorder.microphoneID) {
-                    Text(L10n.tr("source.systemDefault")).tag("")
-                    ForEach(recorder.microphones) { Text($0.name).tag($0.id) }
+                .toggleStyle(.brandCheckbox)
+                LabeledContent(L10n.tr("source.input")) {
+                    MenuPicker(title: L10n.tr("source.input"), selection: $recorder.microphoneID,
+                               options: [.init(value: "", title: L10n.tr("source.systemDefault"))]
+                                   + recorder.microphones.map { .init(value: $0.id, title: $0.name) })
                 }
                 .disabled(!recorder.captureMicrophone)
                 HStack {
                     Text(L10n.tr("source.micVolume")).lineLimit(1)
-                    Slider(value: $recorder.microphoneVolume, in: 0...2)
+                    BrandSlider(value: $recorder.microphoneVolume, range: 0...2, label: L10n.tr("source.micVolume"))
                     Text("\(Int(recorder.microphoneVolume * 100))%").monospacedDigit().frame(width: 44, alignment: .trailing)
                 }
                 .disabled(!recorder.captureMicrophone)
@@ -233,6 +235,7 @@ private struct LevelMeter: View {
 private struct RecordingHistory: View {
     @ObservedObject var store: AppStore
     @ObservedObject var nav: NavigationModel
+    @ObservedObject var engine: ReviewEngine
 
     var body: some View {
         let items = Array(store.recordings.sorted { $0.startedAt > $1.startedAt }.prefix(30))
@@ -241,7 +244,7 @@ private struct RecordingHistory: View {
                 SectionLabel(text: L10n.tr("recording.history"), icon: "clock.arrow.circlepath")
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(items) { rec in
-                        RecordingRow(record: rec, store: store) {
+                        RecordingRow(record: rec, store: store, isReviewing: engine.isRunning(rec.id)) {
                             nav.selectedRecordingID = rec.id
                             nav.section = .review
                         }
@@ -258,6 +261,8 @@ private struct RecordingHistory: View {
 private struct RecordingRow: View {
     let record: RecordingRecord
     @ObservedObject var store: AppStore
+    /// Can't be deleted while its review is running.
+    let isReviewing: Bool
     let onReview: () -> Void
 
     private var link: Binding<UUID?> {
@@ -272,11 +277,9 @@ private struct RecordingRow: View {
                 HStack { info; Spacer(minLength: 12); actions }
                 VStack(alignment: .leading, spacing: 6) { info; actions }
             }
-            Picker(L10n.tr("recording.linkedTo"), selection: link) {
-                Text(L10n.tr("recording.unlinked")).tag(UUID?.none)
-                ForEach(store.interviewsNear(record.startedAt)) { iv in
-                    Text(InterviewText.pickerLabel(iv, store: store)).tag(Optional(iv.id))
-                }
+            LabeledContent(L10n.tr("recording.linkedTo")) {
+                MenuPicker(title: L10n.tr("recording.linkedTo"), selection: link,
+                           options: InterviewText.linkOptions(near: record.startedAt, store: store))
             }
             .controlSize(.small)
         }
@@ -293,9 +296,13 @@ private struct RecordingRow: View {
 
     private var actions: some View {
         HStack(spacing: 8) {
-            Button(L10n.tr("nav.review"), action: onReview).buttonStyle(.borderedProminent)
+            Button(L10n.tr("nav.review"), action: onReview).buttonStyle(.brand)
             Button(L10n.tr("action.play")) { NSWorkspace.shared.open(record.fileURL) }
             Button(L10n.tr("action.showInFinder")) { NSWorkspace.shared.activateFileViewerSelecting([record.fileURL]) }
+            Button { RecordingDeletion.deleteRecording(record, store: store) } label: { Image(systemName: "trash") }
+                .disabled(isReviewing)
+                .help(L10n.tr(isReviewing ? "recording.delete.busy" : "recording.delete"))
+                .accessibilityLabel(L10n.tr("recording.delete"))
         }
         .controlSize(.small)
     }
@@ -303,6 +310,12 @@ private struct RecordingRow: View {
 
 enum InterviewText {
     /// "11月18日 14:00 · 字节跳动 · 后端开发 · 一面"
+    /// "未关联" plus the interviews nearest to `date`, for the link pickers.
+    @MainActor static func linkOptions(near date: Date, store: AppStore) -> [MenuPicker<UUID?>.Option] {
+        [.init(value: nil, title: L10n.tr("recording.unlinked"))]
+            + store.interviewsNear(date).map { .init(value: $0.id, title: pickerLabel($0, store: store)) }
+    }
+
     @MainActor static func pickerLabel(_ iv: Interview, store: AppStore) -> String {
         iv.start.formatted(.dateTime.month().day().hour().minute()) + " · " + store.label(for: iv)
     }
