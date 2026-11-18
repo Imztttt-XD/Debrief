@@ -35,6 +35,16 @@ struct BankQuestion: Codable, Identifiable, Hashable {
     var notes = ""
     /// Average of the latest critique's three scores (1–5).
     var lastScore: Double?
+    /// Every scored answer, oldest first (see Bank/ReviewSchedule.swift). New fields are optional
+    /// so question-bank.json files written before they existed still decode.
+    var attempts: [PracticeAttempt]?
+    /// Consecutive good answers; sets how far out the next review is.
+    var reviewStage: Int?
+    /// When to practise this question again. nil = not scheduled yet.
+    var dueAt: Date?
+    /// The reviews (recording IDs) and mock sessions that added this question, once per time
+    /// asked, so deleting one can undo its part. nil on entries added before this was tracked.
+    var sources: [UUID]?
 
     var categoryTitle: String {
         L10n.tr("review.category.\(ReviewQuestion.categories.contains(category) ? category : "other")")

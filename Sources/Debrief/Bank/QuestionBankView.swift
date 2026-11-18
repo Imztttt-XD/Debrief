@@ -6,7 +6,7 @@ final class BankUIState: ObservableObject {
     @Published var search = ""
     /// "all" or a ReviewQuestion category.
     @Published var category = "all"
-    /// "all" or a BankQuestion.Mastery raw value.
+    /// "all", "due" (今天待复习) or a BankQuestion.Mastery raw value.
     @Published var mastery = "all"
 }
 
@@ -15,13 +15,15 @@ struct QuestionBankView: View {
     @ObservedObject var store: AppStore
     @ObservedObject var nav: NavigationModel
     @ObservedObject var ui: BankUIState
+    @ObservedObject var practice: PracticeEngine
     @StateObject private var feedback = ExportFeedback()
 
     private var visible: [BankQuestion] {
         let q = ui.search.trimmingCharacters(in: .whitespaces).lowercased()
+        let now = Date()
         return store.bank.items
             .filter { ui.category == "all" || $0.category == ui.category }
-            .filter { ui.mastery == "all" || $0.mastery.rawValue == ui.mastery }
+            .filter { ui.mastery == "all" || (ui.mastery == "due" ? $0.isDue(at: now) : $0.mastery.rawValue == ui.mastery) }
             .filter { q.isEmpty || $0.question.lowercased().contains(q) || $0.company.lowercased().contains(q)
                 || ($0.resumeItem ?? "").lowercased().contains(q) }
             .sorted { ($0.timesAsked, $0.lastAskedAt) > ($1.timesAsked, $1.lastAskedAt) }
@@ -37,21 +39,18 @@ struct QuestionBankView: View {
                             .help(L10n.tr("bank.add")).accessibilityLabel(L10n.tr("bank.add"))
                     }
                     HStack {
-                        Picker(L10n.tr("bank.category"), selection: $ui.category) {
-                            Text(L10n.tr("bank.allCategories")).tag("all")
-                            ForEach(ReviewQuestion.categories, id: \.self) { Text(L10n.tr("review.category.\($0)")).tag($0) }
-                        }
-                        .labelsHidden()
-                        Picker(L10n.tr("bank.masteryLabel"), selection: $ui.mastery) {
-                            Text(L10n.tr("bank.allMastery")).tag("all")
-                            ForEach(BankQuestion.Mastery.allCases) { Text($0.title).tag($0.rawValue) }
-                        }
-                        .labelsHidden()
+                        MenuPicker(title: L10n.tr("bank.category"), selection: $ui.category,
+                                   options: [.init(value: "all", title: L10n.tr("bank.allCategories"))]
+                                       + ReviewQuestion.categories.map { .init(value: $0, title: L10n.tr("review.category.\($0)")) })
+                        MenuPicker(title: L10n.tr("bank.masteryLabel"), selection: $ui.mastery,
+                                   options: [.init(value: "all", title: L10n.tr("bank.allMastery")),
+                                             .init(value: "due", title: L10n.tr("practice.filterDue"))]
+                                       + BankQuestion.Mastery.allCases.map { .init(value: $0.rawValue, title: $0.title) })
                     }
                     HStack {
                         Text(L10n.tr("bank.count", [String(visible.count)])).font(.caption).foregroundStyle(.secondary)
                         Spacer()
-                        if let m = feedback.message { Text(m).font(.caption).foregroundStyle(.green) }
+                        if let m = feedback.message { Text(m).font(.caption).foregroundStyle(Theme.success) }
                         Menu(L10n.tr("export.menu")) {
                             Button(L10n.tr("bank.export.copy", [String(visible.count)])) {
                                 ReviewExporter.copy(exportText)
@@ -65,12 +64,14 @@ struct QuestionBankView: View {
                                 } catch { feedback.show(error.localizedDescription) }
                             }
                         }
+                        .menuStyle(.button).buttonStyle(.menuField)
                         .fixedSize()
                         .controlSize(.small)
                         .disabled(visible.isEmpty)
                     }
                 }
                 .padding(10)
+                dueBanner
                 Divider()
                 List {
                     ForEach(visible) { q in
@@ -88,7 +89,7 @@ struct QuestionBankView: View {
 
             Group {
                 if let id = nav.selectedBankID, let binding = binding(for: id) {
-                    BankEditor(item: binding, onDelete: { delete(id) }).id(id)
+                    BankEditor(item: binding, onPractice: { practice.start([id]) }, onDelete: { delete(id) }).id(id)
                 } else {
                     Text(L10n.tr("bank.select")).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -97,6 +98,26 @@ struct QuestionBankView: View {
         }
         .onAppear {
             if !store.bank.items.contains(where: { $0.id == nav.selectedBankID }) { nav.selectedBankID = visible.first?.id }
+        }
+        .sheet(isPresented: Binding(get: { practice.session != nil }, set: { if !$0 { practice.end() } })) {
+            PracticeView(engine: practice, store: store)
+        }
+    }
+
+    /// "今天待复习 5 道 [开始复习]" above the list.
+    @ViewBuilder private var dueBanner: some View {
+        let due = store.bank.due(at: Date())
+        if !due.isEmpty {
+            HStack(spacing: 8) {
+                Image(systemName: "calendar.badge.clock").foregroundStyle(Theme.accent)
+                Text(L10n.tr("practice.dueBanner", [String(due.count)])).font(.callout.weight(.medium))
+                Spacer()
+                Button(L10n.tr("practice.start")) { practice.start(due.map(\.id)) }
+                    .buttonStyle(.brand).controlSize(.small)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.accent.opacity(0.1)))
+            .padding(.horizontal, 10).padding(.bottom, 10)
         }
     }
 
@@ -141,8 +162,8 @@ private struct BankRow: View {
     private var masteryColor: Color {
         switch item.mastery {
         case .new: .secondary
-        case .review: Color(hex: 0xF08A24)
-        case .mastered: Color(hex: 0x23A26D)
+        case .review: Theme.warning
+        case .mastered: Theme.success
         }
     }
 
@@ -152,7 +173,11 @@ private struct BankRow: View {
             HStack(spacing: 6) {
                 Pill(text: item.categoryTitle, color: Theme.accent)
                 Pill(text: item.mastery.title, color: masteryColor)
-                if item.timesAsked > 1 { Pill(text: "×\(item.timesAsked)", color: Theme.pink) }
+                if item.timesAsked > 1 { Pill(text: "×\(item.timesAsked)", color: Theme.neutral) }
+                if item.isDue(at: Date()) {
+                    Image(systemName: "calendar.badge.clock").font(.caption).foregroundStyle(Theme.accent)
+                        .help(L10n.tr("practice.filterDue")).accessibilityLabel(L10n.tr("practice.filterDue"))
+                }
                 if !item.company.isEmpty { Text(item.company).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
             }
         }
@@ -162,6 +187,7 @@ private struct BankRow: View {
 
 private struct BankEditor: View {
     @Binding var item: BankQuestion
+    let onPractice: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
@@ -173,11 +199,37 @@ private struct BankEditor: View {
                 }
                 TextField(L10n.tr("bank.resumeItem"), text: Binding(get: { item.resumeItem ?? "" },
                                                                    set: { item.resumeItem = $0.isEmpty ? nil : $0 }))
-                Picker(L10n.tr("bank.masteryLabel"), selection: $item.mastery) {
-                    ForEach(BankQuestion.Mastery.allCases) { Text($0.title).tag($0) }
+                LabeledContent(L10n.tr("bank.masteryLabel")) {
+                    SegmentedControl(selection: Binding(get: { item.mastery }, set: { item.setMastery($0) }),
+                                     options: BankQuestion.Mastery.allCases.map { .init(value: $0, title: $0.title) })
+                        .frame(maxWidth: 320)
                 }
-                .pickerStyle(.segmented)
             }
+
+            Section {
+                HStack {
+                    if let due = item.dueAt {
+                        Text(L10n.tr("practice.nextReview", [PracticeText.dueText(due)])).foregroundStyle(.secondary)
+                    } else {
+                        Text(L10n.tr("practice.notScheduled")).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(L10n.tr("practice.one"), action: onPractice)
+                        .disabled(item.question.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                ForEach(Array(item.history.reversed().enumerated()), id: \.offset) { _, a in
+                    HStack {
+                        Text(a.date.formatted(date: .abbreviated, time: .omitted))
+                        Text(a.kind.title).foregroundStyle(.secondary)
+                        Spacer()
+                        if a.corrections > 0 {
+                            Text(L10n.tr("practice.corrections", [String(a.corrections)])).font(.caption).foregroundStyle(Theme.danger)
+                        }
+                        Text(String(format: "%.1f", a.score)).monospacedDigit()
+                    }
+                    .font(.callout)
+                }
+            } header: { Text(L10n.tr("practice.section")) }
 
             Section {
                 ForEach(Array(item.followUps.enumerated()), id: \.offset) { i, _ in
@@ -192,15 +244,18 @@ private struct BankEditor: View {
             } header: { Text(L10n.tr("bank.followUps")) }
 
             Section {
-                TextEditor(text: $item.myAnswer).frame(minHeight: 90).accessibilityLabel(L10n.tr("review.myAnswer"))
+                NoteEditor(text: $item.myAnswer, placeholder: L10n.tr("bank.myAnswer.placeholder"),
+                           minHeight: 120, label: L10n.tr("review.myAnswer"))
             } header: { Text(L10n.tr("review.myAnswer")) }
 
             Section {
-                TextEditor(text: $item.betterAnswer).frame(minHeight: 110).accessibilityLabel(L10n.tr("review.betterAnswer"))
+                NoteEditor(text: $item.betterAnswer, placeholder: L10n.tr("bank.betterAnswer.placeholder"),
+                           minHeight: 140, label: L10n.tr("review.betterAnswer"))
             } header: { Text(L10n.tr("review.betterAnswer")) }
 
             Section {
-                TextEditor(text: $item.notes).frame(minHeight: 70).accessibilityLabel(L10n.tr("field.notes"))
+                NoteEditor(text: $item.notes, placeholder: L10n.tr("bank.notes.placeholder"),
+                           minHeight: 100, label: L10n.tr("field.notes"))
             } header: { Text(L10n.tr("field.notes")) }
 
             Section {
