@@ -291,9 +291,7 @@ struct FloatingButtonView: View {
 
     private var idle: some View {
         ZStack {
-            Circle().fill(flash.isOn ? AnyShapeStyle(LinearGradient(colors: [Color(hex: 0x6EE7B7), Color(hex: 0x34C38F)],
-                                                                    startPoint: .topLeading, endPoint: .bottomTrailing))
-                                     : AnyShapeStyle(Theme.brandGradient))
+            Circle().fill(flash.isOn ? AnyShapeStyle(Theme.successGradient) : AnyShapeStyle(Theme.brandGradient))
             Circle().strokeBorder(Color.white.opacity(0.85), lineWidth: 2)
             switch recorder.phase {
             case .starting, .finalizing:

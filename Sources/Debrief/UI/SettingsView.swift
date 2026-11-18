@@ -8,19 +8,19 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("", selection: $tab) {
-                Text(L10n.tr("settings.tab.models")).tag("models")
-                Text(L10n.tr("settings.tab.profile")).tag("profile")
-                Text(L10n.tr("settings.tab.general")).tag("general")
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(maxWidth: 420)
+            SegmentedControl(selection: $tab, options: [
+                .init(value: "models", title: L10n.tr("settings.tab.models")),
+                .init(value: "profile", title: L10n.tr("settings.tab.profile")),
+                .init(value: "general", title: L10n.tr("settings.tab.general")),
+                .init(value: "usage", title: L10n.tr("settings.tab.usage")),
+            ])
+            .frame(maxWidth: 520)
             .padding(12)
             Divider()
             switch tab {
             case "profile": ProfileSettingsView(store: store)
-            case "general": GeneralSettingsView()
+            case "general": GeneralSettingsView(store: store)
+            case "usage": UsageView()
             default: ModelSettingsView(store: store)
             }
         }
@@ -81,6 +81,7 @@ struct ModelSettingsView: View {
                         Button(vendor.title) { store.ai.accounts.append(.preset(vendor)) }
                     }
                 }
+                .menuStyle(.button).buttonStyle(.menuField)
                 .fixedSize()
             } footer: {
                 Text(L10n.tr("ai.privacy")).foregroundStyle(.secondary)
@@ -136,8 +137,21 @@ private struct FunctionRow: View {
     }
 
     private var testButton: some View {
-        Button(L10n.tr("ai.test")) { state.test(function, settings: ai) }
+        Button(isLocal ? L10n.tr("local.prepare") : L10n.tr("ai.test")) { state.test(function, settings: ai) }
             .disabled(state.tests[function] == .running)
+    }
+
+    private var isLocal: Bool { function.isTranscription && ai.usesLocalTranscription }
+
+    /// Transcription only: on this Mac (macOS 26+) or with a cloud model.
+    private var transcriptionMode: some View {
+        SegmentedControl(selection: Binding(get: { ai.usesLocalTranscription },
+                                            set: { ai.localTranscription = $0; state.tests[function] = nil }),
+                         options: [.init(value: true, title: L10n.tr("local.title")),
+                                   .init(value: false, title: L10n.tr("local.cloud"))])
+        .fixedSize()
+        .accessibilityLabel(L10n.tr("local.mode"))
+        .disabled(!LocalTranscriber.isSupported)
     }
 
     private var eligibleAccounts: [ProviderAccount] {
@@ -150,24 +164,35 @@ private struct FunctionRow: View {
                 Text(function.title).font(.headline)
                 Text(function.detail).font(.caption).foregroundStyle(.secondary)
             }
-            // One row when there's room; provider and model on separate rows when narrow.
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 10) { providerField; modelField; Spacer(minLength: 0); testButton }
-                VStack(alignment: .leading, spacing: 8) {
-                    providerField
-                    HStack(spacing: 10) { modelField; Spacer(minLength: 0); testButton }
+            if function.isTranscription {
+                HStack(spacing: 10) {
+                    transcriptionMode
+                    Spacer(minLength: 0)
+                    if isLocal { testButton }
+                }
+                Text(L10n.tr(LocalTranscriber.isSupported ? (isLocal ? "local.note" : "local.cloudNote") : "local.requires"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if !isLocal {
+                // One row when there's room; provider and model on separate rows when narrow.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) { providerField; modelField; Spacer(minLength: 0); testButton }
+                    VStack(alignment: .leading, spacing: 8) {
+                        providerField
+                        HStack(spacing: 10) { modelField; Spacer(minLength: 0); testButton }
+                    }
                 }
             }
-            if function.isTranscription && eligibleAccounts.isEmpty {
+            if function.isTranscription && !isLocal && eligibleAccounts.isEmpty {
                 Text(L10n.tr("ai.noTranscriptionProvider")).font(.caption).foregroundStyle(.secondary)
             }
             switch state.tests[function] {
             case .running:
                 Text(L10n.tr("ai.testing")).font(.caption).foregroundStyle(.secondary)
             case .ok(let m):
-                Label(m, systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.green)
+                Label(m, systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(Theme.success)
             case .failed(let m):
-                Label(m, systemImage: "xmark.octagon.fill").font(.caption).foregroundStyle(.red)
+                Label(m, systemImage: "xmark.octagon.fill").font(.caption).foregroundStyle(Theme.danger)
                     .textSelection(.enabled)
             case nil:
                 EmptyView()
@@ -202,7 +227,7 @@ private struct AccountSection: View {
                 TextField(L10n.tr("ai.account.baseURL"), text: $account.baseURL)
             }
             if account.resolvedBaseURL == nil {
-                Text(L10n.tr("error.ai.invalidURL")).font(.caption).foregroundStyle(.red)
+                Text(L10n.tr("error.ai.invalidURL")).font(.caption).foregroundStyle(Theme.danger)
             }
 
             HStack {
@@ -218,7 +243,7 @@ private struct AccountSection: View {
                 }
             }
             if let error = state.keyErrors[account.id] {
-                Text(error).font(.caption).foregroundStyle(.red)
+                Text(error).font(.caption).foregroundStyle(Theme.danger)
             }
 
             HStack {
@@ -262,7 +287,7 @@ struct ProfileSettingsView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             TextField(L10n.tr("profile.resume.name"), text: $resume.name)
                             if resume.text.isEmpty {
-                                Text(L10n.tr("profile.resume.empty")).font(.callout).foregroundStyle(.orange)
+                                Text(L10n.tr("profile.resume.empty")).font(.callout).foregroundStyle(Theme.warning)
                             }
                             Text(L10n.tr("profile.resume.text")).font(.caption).foregroundStyle(.secondary)
                             TextEditor(text: $resume.text)
@@ -290,7 +315,7 @@ struct ProfileSettingsView: View {
                 }
                 Button(L10n.tr("profile.import")) { importResumes() }
                 if let error = state.importError {
-                    Text(error).font(.caption).foregroundStyle(.red)
+                    Text(error).font(.caption).foregroundStyle(Theme.danger)
                 }
             } header: {
                 Text(L10n.tr("profile.resumes"))
@@ -337,6 +362,9 @@ final class ProfileState: ObservableObject {
 // MARK: - 通用
 
 struct GeneralSettingsView: View {
+    @ObservedObject var store: AppStore
+    @AppStorage(ReviewEngine.speakerSeparationKey) private var speakerSeparation = false
+    @ObservedObject private var downloader = SpeakerModelDownloader.shared
     @AppStorage(AppLanguage.storageKey) private var languageRaw = AppLanguage.default.rawValue
     @AppStorage(FloatingButtonController.visibleKey) private var floatingVisible = true
     @AppStorage(AppAppearance.storageKey) private var appearanceRaw = AppAppearance.system.rawValue
@@ -349,13 +377,62 @@ struct GeneralSettingsView: View {
             .onChange(of: languageRaw) { _, new in
                 (AppLanguage(rawValue: new) ?? .default).applyToSystemUI()
             }
-            Picker(L10n.tr("section.appearance"), selection: $appearanceRaw) {
-                ForEach(AppAppearance.allCases) { Text($0.title).tag($0.rawValue) }
+            LabeledContent(L10n.tr("section.appearance")) {
+                SegmentedControl(selection: $appearanceRaw,
+                                 options: AppAppearance.allCases.map { .init(value: $0.rawValue, title: $0.title) })
+                    .frame(maxWidth: 300)
             }
-            .pickerStyle(.segmented)
             .onChange(of: appearanceRaw) { _, new in (AppAppearance(rawValue: new) ?? .system).apply() }
-            Toggle(L10n.tr("settings.floatingButton"), isOn: $floatingVisible)
+            Toggle(L10n.tr("settings.floatingButton"), isOn: $floatingVisible).toggleStyle(.brandSwitch)
+
+            Section {
+                Toggle(L10n.tr("speakers.toggle"), isOn: Binding(get: { speakerSeparation }, set: { on in
+                    speakerSeparation = on
+                    if on && !SpeakerSeparation.Models.areDownloaded { downloader.start() }
+                }))
+                .toggleStyle(.brandSwitch)
+                .disabled(!SpeakerSeparation.isLibraryAvailable)
+                Text(L10n.tr(SpeakerSeparation.isLibraryAvailable ? "speakers.note" : "speakers.error.library"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if SpeakerSeparation.isLibraryAvailable && speakerSeparation { modelStatus }
+            } header: {
+                Text(L10n.tr("settings.experimental"))
+            }
         }
         .formStyle(.grouped)
+    }
+
+    @ViewBuilder private var modelStatus: some View {
+        switch downloader.state {
+        case .downloading(let fraction):
+            HStack {
+                BrandProgressBar(value: fraction).frame(maxWidth: 220)
+                // "12.3 MB / 32.4 MB": visibly moving even on a slow connection.
+                Text(L10n.tr("speakers.progress", [
+                    ByteCountFormatter.string(fromByteCount: Int64(fraction * Double(SpeakerSeparation.Models.totalSize)), countStyle: .file),
+                    ByteCountFormatter.string(fromByteCount: SpeakerSeparation.Models.totalSize, countStyle: .file),
+                ]))
+                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                Spacer()
+                Button(L10n.tr("action.cancel")) { downloader.cancel() }.controlSize(.small)
+            }
+        case .failed(let message):
+            HStack {
+                Label(message, systemImage: "xmark.octagon.fill").font(.caption).foregroundStyle(Theme.danger)
+                Spacer()
+                Button(L10n.tr("speakers.retry")) { downloader.start() }.controlSize(.small)
+            }
+        case .idle:
+            if SpeakerSeparation.Models.areDownloaded {
+                Label(L10n.tr("speakers.ready"), systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(Theme.success)
+            } else {
+                HStack {
+                    Text(L10n.tr("speakers.needModels", [ByteCountFormatter.string(fromByteCount: SpeakerSeparation.Models.totalSize, countStyle: .file)]))
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button(L10n.tr("speakers.download")) { downloader.start() }.controlSize(.small)
+                }
+            }
+        }
     }
 }

@@ -33,11 +33,9 @@ struct ApplicationsView: View {
                         .help(L10n.tr("app.new"))
                         .accessibilityLabel(L10n.tr("app.new"))
                     }
-                    Picker(L10n.tr("field.status"), selection: $filter) {
-                        Text(L10n.tr("app.filter.all")).tag("all")
-                        ForEach(JobApplication.Status.allCases) { Text($0.title).tag($0.rawValue) }
-                    }
-                    .labelsHidden()
+                    MenuPicker(title: L10n.tr("field.status"), selection: $filter,
+                               options: [.init(value: "all", title: L10n.tr("app.filter.all"))]
+                                   + JobApplication.Status.allCases.map { .init(value: $0.rawValue, title: $0.title) })
                 }
                 .padding(10)
                 Divider()
@@ -106,7 +104,7 @@ private struct EmptyApplications: View {
             Text(L10n.tr("app.empty.title")).font(.headline)
             Text(L10n.tr("app.empty.message")).font(.callout).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-            Button(L10n.tr("app.new"), action: onCreate).buttonStyle(.borderedProminent)
+            Button(L10n.tr("app.new"), action: onCreate).buttonStyle(.brand)
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -135,12 +133,12 @@ struct StatusBadge: View {
 
     private var color: Color {
         switch status {
-        case .applied: Theme.accent
-        case .interviewing: Color(hex: 0xF08A24)
-        case .awaitingResult: .purple
-        case .offer: Color(hex: 0x23A26D)
-        case .rejected: Theme.record
-        case .withdrawn: .gray
+        case .applied: Theme.neutral
+        case .interviewing: Theme.accent
+        case .awaitingResult: Theme.blue
+        case .offer: Theme.success
+        case .rejected: Theme.danger
+        case .withdrawn: Theme.neutral
         }
     }
 
@@ -197,10 +195,8 @@ private struct ApplicationEditor: View {
             }
 
             Section {
-                TextEditor(text: $application.jobDescription)
-                    .font(.body)
-                    .frame(minHeight: 220)
-                    .accessibilityLabel(L10n.tr("field.jd"))
+                NoteEditor(text: $application.jobDescription, placeholder: L10n.tr("field.jd.placeholder"),
+                           minHeight: 240, label: L10n.tr("field.jd"))
             } header: {
                 Text(L10n.tr("field.jd"))
             } footer: {
@@ -208,10 +204,8 @@ private struct ApplicationEditor: View {
             }
 
             Section {
-                TextEditor(text: $application.notes)
-                    .font(.body)
-                    .frame(minHeight: 90)
-                    .accessibilityLabel(L10n.tr("field.notes"))
+                NoteEditor(text: $application.notes, placeholder: L10n.tr("field.notes.appPlaceholder"),
+                           minHeight: 110, label: L10n.tr("field.notes"))
             } header: {
                 Text(L10n.tr("field.notes"))
             }

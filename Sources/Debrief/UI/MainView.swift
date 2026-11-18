@@ -42,12 +42,16 @@ struct MainView: View {
     @ObservedObject var reminders: ReminderScheduler
     @ObservedObject var engine: ReviewEngine
     @ObservedObject var mockEngine: MockEngine
+    @ObservedObject var practice: PracticeEngine
     @AppStorage(AppLanguage.storageKey) private var languageRaw = AppLanguage.default.rawValue
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $nav.section) {
+            // Selection is drawn by the app (periwinkle wash, accent label) rather than by the
+            // system, whose highlight uses the user's system accent colour (usually blue).
+            List {
                 HStack(spacing: 8) {
                     Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 28, height: 28)
                     Text(L10n.tr("app.name")).font(.headline)
@@ -55,17 +59,29 @@ struct MainView: View {
                 .padding(.vertical, 6)
                 .selectionDisabled()
                 ForEach(NavigationModel.Section.allCases) { section in
+                    let selected = (nav.section ?? .applications) == section
                     HStack {
-                        Label(section.title, systemImage: section.icon)
+                        // Icon styled on its own: the sidebar list tints Label icons itself.
+                        Label {
+                            Text(section.title)
+                                .foregroundStyle(selected ? Theme.selectedText : Color.primary)
+                                .fontWeight(selected ? .semibold : .regular)
+                        } icon: {
+                            Image(systemName: section.icon)
+                                .foregroundStyle(selected ? Theme.selectedText : Color.secondary)
+                        }
                         if section == .recording && recorder.isRecording {
                             Spacer()
                             Circle().fill(Theme.record).frame(width: 8, height: 8)
                                 .accessibilityLabel(L10n.tr("a11y.recording"))
                         }
                     }
-                    .tag(section)
+                    .badge(section == .bank ? store.bank.due(at: Date()).count : 0)
+                    .padding(.vertical, 2)
+                    .selectableRow(selected) { nav.section = section }
                 }
             }
+            .background(Theme.sidebarBackground)
             .navigationSplitViewColumnWidth(min: 150, ideal: 168, max: 220)
         } detail: {
             VStack(spacing: 0) {
@@ -75,13 +91,19 @@ struct MainView: View {
                         .foregroundStyle(.white)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(8)
-                        .background(Color.red)
+                        .background(Theme.dangerFill)
                 }
                 detail.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .background(Theme.windowBackground)
             .navigationTitle((nav.section ?? .applications).title)
         }
-        .tint(Theme.accent)
+        .tint(Theme.control)
+        .buttonStyle(.soft)
+        // Dark mode: lists and forms drop their grey system backgrounds so the violet-tinted
+        // window background (Theme.windowBackground) shows through. Light mode is unchanged.
+        .scrollContentBackground(colorScheme == .dark ? .hidden : .automatic)
+        .containerBackground(Theme.windowBackground, for: .window)
         .frame(minWidth: 900, minHeight: 600)
         .onAppear { MainWindow.register(openWindow) }
         // Rebuild the whole tree when the language changes so every L10n.tr call runs again.
@@ -93,10 +115,10 @@ struct MainView: View {
         switch nav.section ?? .applications {
         case .applications: ApplicationsView(store: store, nav: nav)
         case .schedule: ScheduleView(store: store, nav: nav, reminders: reminders, recorder: recorder, state: nav.schedule)
-        case .recording: RecordingView(recorder: recorder, store: store, nav: nav)
-        case .review: ReviewView(store: store, engine: engine, nav: nav)
+        case .recording: RecordingView(recorder: recorder, store: store, nav: nav, engine: engine)
+        case .review: ReviewView(store: store, engine: engine, nav: nav, recordingsFolder: recorder.outputDirectory)
         case .mock: MockInterviewView(store: store, engine: mockEngine, nav: nav, ui: nav.mockUI)
-        case .bank: QuestionBankView(store: store, nav: nav, ui: nav.bankUI)
+        case .bank: QuestionBankView(store: store, nav: nav, ui: nav.bankUI, practice: practice)
         case .settings: SettingsView(store: store)
         }
     }

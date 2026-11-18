@@ -30,7 +30,7 @@ struct MockInterviewView: View {
                 } label: {
                     Label(L10n.tr("mock.new"), systemImage: "plus").frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.brand)
                 .controlSize(.large)
                 .padding(10)
                 Divider()
@@ -84,7 +84,7 @@ private struct MockRow: View {
                 if busy {
                     Label(L10n.tr("mock.thinking"), systemImage: "ellipsis.bubble").foregroundStyle(Theme.accent)
                 } else if session.summary != nil {
-                    Label(L10n.tr("review.status.done"), systemImage: "checkmark.circle").foregroundStyle(.green)
+                    Label(L10n.tr("review.status.done"), systemImage: "checkmark.circle").foregroundStyle(Theme.success)
                 } else if session.finished {
                     Label(L10n.tr("mock.status.ended"), systemImage: "flag.checkered").foregroundStyle(.secondary)
                 } else {
@@ -118,17 +118,20 @@ private struct MockSetupView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 14) {
-                    Picker(L10n.tr("schedule.field.application"), selection: $ui.newApplicationID) {
-                        Text(L10n.tr("mock.setup.noApplication")).tag(UUID?.none)
-                        ForEach(store.sortedApplications) { Text("\($0.displayCompany) · \($0.displayRole)").tag(Optional($0.id)) }
+                    LabeledContent(L10n.tr("schedule.field.application")) {
+                        MenuPicker(title: L10n.tr("schedule.field.application"), selection: $ui.newApplicationID,
+                                   options: [.init(value: UUID?.none, title: L10n.tr("mock.setup.noApplication"))]
+                                       + store.sortedApplications.map { .init(value: Optional($0.id), title: "\($0.displayCompany) · \($0.displayRole)") })
                     }
-                    Picker(L10n.tr("mock.setup.focus"), selection: $ui.newFocus) {
-                        ForEach(MockSession.Focus.allCases) { Text($0.title).tag($0) }
+                    LabeledContent(L10n.tr("mock.setup.focus")) {
+                        MenuPicker(title: L10n.tr("mock.setup.focus"), selection: $ui.newFocus,
+                                   options: MockSession.Focus.allCases.map { .init(value: $0, title: $0.title) })
                     }
-                    Picker(L10n.tr("mock.setup.count"), selection: $ui.newCount) {
-                        ForEach(MockSession.questionCountChoices, id: \.self) { Text(L10n.tr("mock.setup.countValue", [String($0)])).tag($0) }
+                    LabeledContent(L10n.tr("mock.setup.count")) {
+                        SegmentedControl(selection: $ui.newCount, options: MockSession.questionCountChoices.map {
+                            .init(value: $0, title: L10n.tr("mock.setup.countValue", [String($0)]))
+                        })
                     }
-                    .pickerStyle(.segmented)
                 }
                 .card()
 
@@ -137,7 +140,7 @@ private struct MockSetupView: View {
                       systemImage: "books.vertical")
                     .font(.callout).foregroundStyle(.secondary)
                 if store.resumes.isEmpty {
-                    Label(L10n.tr("mock.setup.noResume"), systemImage: "doc.badge.plus").font(.callout).foregroundStyle(.orange)
+                    Label(L10n.tr("mock.setup.noResume"), systemImage: "doc.badge.plus").font(.callout).foregroundStyle(Theme.warning)
                 }
 
                 Button {
@@ -146,7 +149,7 @@ private struct MockSetupView: View {
                 } label: {
                     Label(L10n.tr("mock.setup.start"), systemImage: "play.fill").frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.brand)
                 .controlSize(.large)
             }
             .padding(28)
@@ -174,11 +177,9 @@ private struct MockSessionView: View {
             header
             Divider()
             if session.summary != nil || !session.questions.isEmpty {
-                Picker("", selection: $tab) {
-                    Text(L10n.tr("mock.tab.chat")).tag("chat")
-                    Text(L10n.tr("mock.tab.feedback")).tag("feedback")
-                }
-                .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 260).padding(10)
+                SegmentedControl(selection: $tab, options: [.init(value: "chat", title: L10n.tr("mock.tab.chat")),
+                                                            .init(value: "feedback", title: L10n.tr("mock.tab.feedback"))])
+                    .frame(maxWidth: 260).padding(10)
             }
             if tab == "feedback" && (session.summary != nil || !session.questions.isEmpty) {
                 feedbackView
@@ -205,11 +206,11 @@ private struct MockSessionView: View {
                     Button(L10n.tr("mock.finish")) { engine.finish(session.id) }
                         .disabled(session.mainQuestionsAsked == 0 || engine.isBusy(session.id))
                 } else if session.summary == nil {
-                    Button(L10n.tr("mock.critique")) { engine.finish(session.id) }.buttonStyle(.borderedProminent)
+                    Button(L10n.tr("mock.critique")) { engine.finish(session.id) }.buttonStyle(.brand)
                 }
                 exportMenu
                 if let message = feedback.message {
-                    Label(message, systemImage: "checkmark.circle.fill").font(.callout).foregroundStyle(.green)
+                    Label(message, systemImage: "checkmark.circle.fill").font(.callout).foregroundStyle(Theme.success)
                 }
                 Spacer()
                 Button(role: .destructive) { confirmDelete() } label: { Image(systemName: "trash") }
@@ -219,7 +220,7 @@ private struct MockSessionView: View {
             }
             if let error = session.lastError, !engine.isBusy(session.id) {
                 HStack {
-                    Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).textSelection(.enabled)
+                    Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(Theme.danger).textSelection(.enabled)
                     if !session.finished && !session.awaitingAnswer {
                         Button(L10n.tr("mock.retry")) { engine.retry(session.id) }
                     }
@@ -255,6 +256,7 @@ private struct MockSessionView: View {
                 } catch { feedback.show(error.localizedDescription) }
             }
         }
+        .menuStyle(.button).buttonStyle(.menuField)
         .fixedSize()
         .disabled(questions.isEmpty)
         .help(L10n.tr("mock.export.help"))
@@ -299,7 +301,7 @@ private struct MockSessionView: View {
                     .textFieldStyle(.plain)
                     .lineLimit(2...8)
                     .padding(10)
-                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(nsColor: .controlBackgroundColor)))
+                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.card))
                     .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.primary.opacity(0.1)))
                     .disabled(!session.awaitingAnswer)
                 Button {
@@ -329,8 +331,8 @@ private struct MockSessionView: View {
                 if let s = session.summary {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(s.overall).textSelection(.enabled)
-                        BulletList(title: L10n.tr("review.strengths"), icon: "hand.thumbsup", color: .green, items: s.strengths)
-                        BulletList(title: L10n.tr("review.improvements"), icon: "arrow.up.right", color: .orange, items: s.improvements)
+                        BulletList(title: L10n.tr("review.strengths"), icon: "hand.thumbsup", color: Theme.success, items: s.strengths)
+                        BulletList(title: L10n.tr("review.improvements"), icon: "arrow.up.right", color: Theme.warning, items: s.improvements)
                         BulletList(title: L10n.tr("review.actionItems"), icon: "checklist", color: Theme.accent, items: s.actionItems)
                     }
                     .card(padding: 16)
@@ -374,7 +376,7 @@ private struct Bubble: View {
                     Text(message.text)
                         .textSelection(.enabled)
                         .padding(.horizontal, 14).padding(.vertical, 10)
-                        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(nsColor: .controlBackgroundColor)))
+                        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.card))
                         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.primary.opacity(0.07)))
                 }
                 Spacer(minLength: 60)

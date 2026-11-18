@@ -35,6 +35,7 @@ i1 = iv(a1, "一面", -2)
 iv(a1, "二面", 26)
 iv(a2, "HR 面", 50, "phone", 30)
 iv(a3, "一面", 75, "onsite", 90)
+iv(a4, "一面", -24 * 6 - 3)   # a past-only day, to show the ended marker
 dump("interviews.json", ivs)
 rec_id = U()
 dump("recordings.json", [{"id": rec_id, "fileURL": "file://" + os.path.abspath(audio), "startedAt": iso(now - dt.timedelta(hours=2)),
@@ -98,3 +99,23 @@ dump("MockInterviews/" + mock_id + ".json", {"id": mock_id, "applicationID": a1[
      "createdAt": iso(now - dt.timedelta(minutes=12)), "updatedAt": iso(now), "finished": False, "questions": [], "summary": None, "lastError": None,
      "messages": [{"id": U(), "kind": k, "text": t, "createdAt": iso(now), "category": c, "resumeItem": r} for k, t, c, r in msgs]})
 print("bank + mock demo data added")
+
+# Token usage for the 用量 page: two weeks, made-up numbers.
+import random
+random.seed(7)
+usage = []
+for back in range(14):
+    day = (now - dt.timedelta(days=back)).strftime("%Y-%m-%d")
+    if back in (3, 9): continue                      # days with nothing
+    usage.append({"day": day, "function": "review", "provider": "DeepSeek", "model": "deepseek-v4-pro",
+                  "requests": random.randint(2, 6), "input": random.randint(20000, 60000), "output": random.randint(15000, 40000),
+                  "reasoning": random.randint(8000, 20000), "cached": random.randint(0, 8000), "audioSeconds": 0})
+    usage.append({"day": day, "function": "mockInterview", "provider": "DeepSeek", "model": "deepseek-flash",
+                  "requests": random.randint(4, 20), "input": random.randint(8000, 30000), "output": random.randint(2000, 8000),
+                  "reasoning": 0, "cached": 0, "audioSeconds": 0})
+    if back % 3 == 0:
+        usage.append({"day": day, "function": "transcription", "provider": "阿里云百炼", "model": "qwen3-asr-flash",
+                      "requests": random.randint(60, 180), "input": random.randint(30000, 90000), "output": random.randint(3000, 9000),
+                      "reasoning": 0, "cached": 0, "audioSeconds": random.randint(900, 2400)})
+dump("usage.json", usage)
+print("usage demo data added")
