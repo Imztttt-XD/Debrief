@@ -54,7 +54,7 @@ final class Recorder: ObservableObject {
     var onNeedsAttention: (() -> Void)?
 
     /// Interview this recording belongs to. Picked automatically when recording starts (the
-    /// scheduled interview closest to now, see AppStore.interviewCandidates) and changeable
+    /// scheduled interview closest to now, see Interview.candidates) and changeable
     /// while recording; saved with the recording.
     @Published var linkedInterviewID: UUID?
     /// Set by AppDelegate: finds the interview for a point in time.

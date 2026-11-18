@@ -113,7 +113,10 @@ do {
     child.waitUntilExit()
 
     let leftovers = RecordingFiles.leftoverTemporaryFiles(in: dir)
-    check(leftovers.contains(temp), "crashed recording left \(temp.lastPathComponent)")
+    // Compare names, not URLs: the listing can spell the same folder differently
+    // (/private/var vs /var, directory hint), and URL == compares the spelling.
+    check(leftovers.map(\.lastPathComponent).contains(temp.lastPathComponent),
+          "crashed recording left \(temp.lastPathComponent)")
 
     let recovered = RecordingFiles.finalURL(forTemporary: temp)
     do {

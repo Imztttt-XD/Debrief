@@ -233,7 +233,7 @@ private struct InterviewRow: View {
         let now = Date()
         let isPast = interview.end <= now
         // Recording is offered from 30 min before until the end.
-        let canRecord = !isPast && interview.start.addingTimeInterval(-AppStore.matchMargin) <= now
+        let canRecord = !isPast && interview.start.addingTimeInterval(-Interview.matchMargin) <= now
 
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .trailing, spacing: 2) {

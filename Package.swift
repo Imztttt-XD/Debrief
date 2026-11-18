@@ -11,6 +11,9 @@ let package = Package(
         .executableTarget(name: "Debrief", dependencies: ["RecorderCore"]),
         // Headless check of the writer / crash-recovery / mixdown path (no permissions needed).
         .executableTarget(name: "RecorderSelfTest", dependencies: ["RecorderCore"]),
+        // Unit tests for pure app logic (question bank merge, recording ↔ interview matching).
+        // Swift Testing ships with the Command Line Tools: `swift test`.
+        .testTarget(name: "DebriefTests", dependencies: ["Debrief"]),
     ],
     swiftLanguageModes: [.v5]
 )
