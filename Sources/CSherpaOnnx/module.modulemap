@@ -1,0 +1,7 @@
+// sherpa-onnx v2.0.1 C API header (Apache-2.0, https://github.com/k2-fsa/sherpa-onnx), types only.
+// Nothing links against the library: the app loads it at runtime (Review/SpeakerSeparation.swift)
+// from Contents/Frameworks, so builds and tests work without it.
+module CSherpaOnnx [system] {
+  header "c-api.h"
+  export *
+}

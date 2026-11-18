@@ -79,6 +79,13 @@ struct Review: Codable, Identifiable, Hashable {
 
     var transcript: [Utterance] = []
     var transcriptModel: String?
+    /// Speakers were told apart automatically (SpeakerSeparation) and may be wrong; the review
+    /// page says so and offers to swap 面试官 / 我. Optional so older review files decode.
+    var speakersEstimated: Bool?
+    /// Cloud transcription results saved segment by segment (Transcriber.segmentKey → text), so an
+    /// interrupted run (e.g. rate limited) resumes instead of paying for the same segments again.
+    /// Cleared once the transcript is complete. Optional so older review files decode.
+    var transcriptCache: [String: String]?
     /// True after the user edits the transcript, until the next analysis.
     var transcriptEdited = false
 

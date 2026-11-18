@@ -91,6 +91,17 @@ struct AISettings: Codable, Hashable {
     var accounts: [ProviderAccount]
     /// Keyed by AIFunction.rawValue (plain String keys keep the JSON readable).
     var assignments: [String: ModelAssignment]
+    /// Transcribe on this Mac (Apple's speech recognizer, macOS 26+) instead of the cloud model.
+    /// nil = never chosen: see `usesLocalTranscription`. Optional so older settings files decode.
+    var localTranscription: Bool?
+
+    /// Whether reviews transcribe on this Mac. When the user hasn't chosen, local is the default
+    /// unless they already saved a key for the cloud transcription provider.
+    var usesLocalTranscription: Bool {
+        guard LocalTranscriber.isSupported else { return false }
+        if let localTranscription { return localTranscription }
+        return account(assignment(for: .transcription).accountID)?.keyHint == nil
+    }
 
     func assignment(for function: AIFunction) -> ModelAssignment {
         assignments[function.rawValue] ?? ModelAssignment(accountID: nil, model: "")

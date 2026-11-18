@@ -53,6 +53,9 @@ jobs:
           IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" | grep -o '"Developer ID Application[^"]*"' | head -1 | tr -d '"')
           echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
+      - name: Fetch speaker separation libraries
+        run: ./scripts/fetch-sherpa.sh
+
       - name: Build app
         run: ./build-app.sh
 

@@ -13,80 +13,130 @@ struct Transcriber {
     let context: String
 
     static let concurrency = 4
+    /// Server errors and network failures: a few quick retries.
     static let maxAttempts = 3
+    /// Rate limits (429) are per minute, so they get more and longer waits: 4, 8, 16, 32, 60 s.
+    static let rateLimitAttempts = 6
 
     private struct Job: Sendable {
+        let key: String
         let speaker: Utterance.Speaker
         let start: Double
         let end: Double
         let wav: Data
     }
 
-    /// `progress(done, total)` is called as segments finish.
-    func transcribe(_ record: RecordingRecord,
-                    progress: @escaping @Sendable (Int, Int) -> Void) async throws -> [Utterance] {
-        // Prefer the per-speaker track file; fall back to the mixed .m4a (speaker unknown).
-        let tracksFile = record.tracksFileURL.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
-        let file = tracksFile ?? record.fileURL
-        let usingTracks = tracksFile != nil
-        let trackCount = try await SpeechSegmenter.audioTrackCount(url: file)
+    /// Identifies a speech segment across runs (same audio → same segments), for resuming.
+    static func segmentKey(_ speaker: Utterance.Speaker, start: Double) -> String {
+        "\(speaker.rawValue)@\(Int((start * 1000).rounded()))"
+    }
 
+    /// After a rate limit, the rest of the run sends one request at a time.
+    private actor Throttle {
+        private(set) var limit: Int
+        init(_ limit: Int) { self.limit = limit }
+        func rateLimited() { limit = 1 }
+    }
+
+    /// `cached`: segment results from an earlier, interrupted run (segmentKey → text; "" for
+    /// silence), used instead of sending those segments again. `onSegment` gets each new result
+    /// as it arrives, so the caller can save it. `progress(done, total)` as segments finish.
+    func transcribe(_ record: RecordingRecord, cached: [String: String] = [:],
+                    onSegment: @escaping @Sendable (String, String) -> Void = { _, _ in },
+                    progress: @escaping @Sendable (Int, Int) -> Void) async throws -> [Utterance] {
+        let (file, speakers) = try await Self.sources(for: record)
         var jobs: [Job] = []
-        for index in 0..<trackCount {
-            let speaker: Utterance.Speaker
-            if usingTracks, record.tracks.indices.contains(index) {
-                speaker = record.tracks[index] == .system ? .interviewer : .me
-            } else {
-                speaker = .unknown
-            }
+        for (index, speaker) in speakers.enumerated() {
             let track = try await SpeechSegmenter.readTrack(url: file, index: index)
             for seg in SpeechSegmenter.segments(track.samples) {
-                jobs.append(Job(speaker: speaker, start: track.startOffset + seg.start,
+                let start = track.startOffset + seg.start
+                jobs.append(Job(key: Self.segmentKey(speaker, start: start), speaker: speaker, start: start,
                                 end: track.startOffset + seg.end, wav: SpeechSegmenter.wav(track.samples, seg)))
             }
             try Task.checkCancellation()
         }
         guard !jobs.isEmpty else { return [] }
-        progress(0, jobs.count)
+
+        func utterance(_ job: Job, _ text: String) -> Utterance? {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : Utterance(speaker: job.speaker, start: job.start, end: job.end, text: trimmed)
+        }
+        var results: [Utterance] = jobs.compactMap { job in cached[job.key].flatMap { utterance(job, $0) } }
+        let pending = jobs.filter { cached[$0.key] == nil }
+        var done = jobs.count - pending.count
+        progress(done, jobs.count)
 
         let client = client, model = model, context = context
-        var results: [Utterance] = []
-        var done = 0
+        let throttle = Throttle(Self.concurrency)
         try await withThrowingTaskGroup(of: Utterance?.self) { group in
-            var next = 0
+            var next = 0, inFlight = 0
             func addNext() {
-                guard next < jobs.count else { return }
-                let job = jobs[next]
+                guard next < pending.count else { return }
+                let job = pending[next]
                 next += 1
+                inFlight += 1
                 group.addTask {
-                    let text = try await Self.withRetry {
+                    let text = try await Self.withRetry(onRateLimit: { await throttle.rateLimited() }) {
                         try await client.transcribe(wav: job.wav, model: model, context: context)
                     }
-                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    return trimmed.isEmpty ? nil : Utterance(speaker: job.speaker, start: job.start, end: job.end, text: trimmed)
+                    onSegment(job.key, text)
+                    return utterance(job, text)
                 }
             }
             for _ in 0..<Self.concurrency { addNext() }
             while let result = try await group.next() {
+                inFlight -= 1
                 if let result { results.append(result) }
                 done += 1
                 progress(done, jobs.count)
-                addNext()
+                let limit = await throttle.limit
+                while inFlight < limit && next < pending.count { addNext() }
             }
         }
         return Self.removeEcho(results).sorted { $0.start < $1.start }
     }
 
-    static func withRetry<T: Sendable>(_ work: @Sendable () async throws -> T) async throws -> T {
+    /// Seconds to wait before attempt `attempt + 1`. Rate limits: the server's Retry-After if it
+    /// sent one (capped at 2 minutes), else 4, 8, 16, 32, 60 s. Other errors: 2, 8 s.
+    static func retryDelay(attempt: Int, error: AIError) -> Double {
+        if error.isRateLimit {
+            if let after = error.retryAfter, after > 0 { return min(after, 120) }
+            return min(60, 4 * pow(2, Double(attempt - 1)))
+        }
+        return Double(attempt * attempt) * 2
+    }
+
+    /// Retries retryable AIErrors (see retryDelay). `onRateLimit` is told about each 429 so the
+    /// caller can slow down; `delay` is replaceable for tests.
+    static func withRetry<T: Sendable>(onRateLimit: (@Sendable () async -> Void)? = nil,
+                                       delay: @Sendable (Int, AIError) -> Double = { retryDelay(attempt: $0, error: $1) },
+                                       _ work: @Sendable () async throws -> T) async throws -> T {
         var attempt = 1
         while true {
             do {
                 return try await work()
-            } catch let error as AIError where error.retryable && attempt < maxAttempts {
-                try await Task.sleep(for: .seconds(Double(attempt * attempt) * 2))   // 2 s, 8 s
+            } catch let error as AIError where error.retryable
+                        && attempt < (error.isRateLimit ? rateLimitAttempts : maxAttempts) {
+                if error.isRateLimit { await onRateLimit?() }
+                // ±20% jitter so parallel requests don't all retry at the same moment.
+                let wait = delay(attempt, error) * Double.random(in: 0.8...1.2)
+                try await Task.sleep(for: .seconds(wait))
                 attempt += 1
             }
         }
+    }
+
+    /// The file to read and the speaker of each of its audio tracks. Prefers the per-speaker
+    /// track file (system = interviewer, mic = me); falls back to the mixed .m4a (speaker unknown).
+    static func sources(for record: RecordingRecord) async throws -> (URL, [Utterance.Speaker]) {
+        let tracksFile = record.tracksFileURL.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+        let file = tracksFile ?? record.fileURL
+        let count = try await SpeechSegmenter.audioTrackCount(url: file)
+        let speakers = (0..<count).map { index -> Utterance.Speaker in
+            guard tracksFile != nil, record.tracks.indices.contains(index) else { return .unknown }
+            return record.tracks[index] == .system ? .interviewer : .me
+        }
+        return (file, speakers)
     }
 
     /// Without headphones the mic also picks up the interviewer from the speakers, so the same
@@ -118,16 +168,21 @@ struct Transcriber {
     /// Context for the recognizer: who/what the interview is about plus technical terms
     /// (Latin-script words like Redis, Kafka, B+Tree) found in the JD and resume, most frequent first.
     static func context(company: String, role: String, jd: String, resume: String) -> String {
+        let terms = terms(jd: jd, resume: resume)
+        var parts: [String] = []
+        if !company.isEmpty || !role.isEmpty { parts.append("面试：\(company) \(role)") }
+        if !terms.isEmpty { parts.append("术语：" + terms.joined(separator: ", ")) }
+        return parts.joined(separator: "\n")
+    }
+
+    /// Latin-script technical terms in the JD and resume, most frequent first (at most 80).
+    static func terms(jd: String, resume: String) -> [String] {
         let pattern = try! NSRegularExpression(pattern: "[A-Za-z][A-Za-z0-9+#./-]{1,30}")
         let text = jd + "\n" + resume
         var counts: [String: Int] = [:]
         for m in pattern.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
             if let r = Range(m.range, in: text) { counts[String(text[r]), default: 0] += 1 }
         }
-        let terms = counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.prefix(80).map(\.key)
-        var parts: [String] = []
-        if !company.isEmpty || !role.isEmpty { parts.append("面试：\(company) \(role)") }
-        if !terms.isEmpty { parts.append("术语：" + terms.joined(separator: ", ")) }
-        return parts.joined(separator: "\n")
+        return counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.prefix(80).map(\.key)
     }
 }
