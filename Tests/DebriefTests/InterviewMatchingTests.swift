@@ -46,3 +46,26 @@ struct InterviewMatchingTests {
         #expect(result.map(\.id) == [second.id, first.id])
     }
 }
+
+@Suite("Interview.marks")
+struct InterviewDayMarksTests {
+    private var utc: Calendar {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "UTC")!
+        return c
+    }
+
+    @Test func countsUpcomingAndEndedByPlannedEnd() {
+        // The shared `base` is late evening UTC, so build a day from 09:00 to keep everything on it.
+        let nine = utc.date(bySettingHour: 9, minute: 0, second: 0, of: base)!
+        func t(_ minutes: Double) -> Date { nine.addingTimeInterval(minutes * 60) }
+        func iv(_ minutes: Double) -> Interview { Interview(applicationID: UUID(), start: t(minutes), durationMinutes: 60) }
+        let all = [iv(0), iv(240), iv(24 * 60)]           // 09:00–10:00, 13:00–14:00, next day 09:00
+        // Between the two: the morning one has ended, the afternoon one hasn't.
+        #expect(Interview.marks(all, on: nine, now: t(120), calendar: utc) == .init(upcoming: 1, ended: 1))
+        // Exactly at the planned end counts as ended.
+        #expect(Interview.marks(all, on: nine, now: t(300), calendar: utc) == .init(upcoming: 0, ended: 2))
+        #expect(Interview.marks(all, on: nine, now: t(-10), calendar: utc) == .init(upcoming: 2, ended: 0))
+        #expect(Interview.marks(all, on: t(24 * 60), now: t(120), calendar: utc) == .init(upcoming: 1, ended: 0))
+    }
+}

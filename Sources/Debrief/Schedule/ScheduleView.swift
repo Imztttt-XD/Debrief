@@ -8,6 +8,8 @@ final class ScheduleState: ObservableObject {
     /// nil = show the upcoming list instead of one day.
     @Published var selectedDay: Date?
     @Published var draft: InterviewDraft?
+    /// Month shown in the editor's calendar; nil = the draft's own month.
+    @Published var editorMonth: Date?
 }
 
 /// What the editor sheet edits: a copy of the interview plus fields for creating a new
@@ -47,12 +49,12 @@ struct ScheduleView: View {
                     Label(L10n.tr("schedule.new"), systemImage: "plus")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.brand)
                 .controlSize(.large)
                 if reminders.permission == .denied {
                     VStack(alignment: .leading, spacing: 6) {
                         Label(L10n.tr("schedule.notificationsOff"), systemImage: "bell.slash")
-                            .font(.callout).foregroundStyle(.orange)
+                            .font(.callout).foregroundStyle(Theme.warning)
                         Button(L10n.tr("schedule.openNotificationSettings")) { reminders.openSystemSettings() }
                     }
                 }
@@ -85,8 +87,44 @@ private struct MonthCalendar: View {
     @ObservedObject var state: ScheduleState
     private let cal = Calendar.current
 
+    var body: some View {
+        VStack(spacing: 8) {
+            MonthGrid(month: $state.displayedMonth, selected: state.selectedDay,
+                      marks: { store.interviewMarks(on: $0) }) { day in
+                let isSelected = state.selectedDay.map { cal.isDate($0, inSameDayAs: day) } ?? false
+                state.selectedDay = isSelected ? nil : cal.startOfDay(for: day)
+            }
+
+            HStack {
+                Button(L10n.tr("schedule.today")) {
+                    state.displayedMonth = cal.dateInterval(of: .month, for: Date())?.start ?? Date()
+                    state.selectedDay = cal.startOfDay(for: Date())
+                }
+                Spacer()
+                if state.selectedDay != nil {
+                    Button(L10n.tr("schedule.showUpcoming")) { state.selectedDay = nil }
+                }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.accent)
+            .font(.callout)
+        }
+    }
+}
+
+/// A month of day buttons with a dot per interview on that day (up to 3): brand-coloured for
+/// interviews still to come, very light grey for ended ones; a day whose interviews have all
+/// ended also gets a light grey background. Used by the schedule page and the interview editor.
+struct MonthGrid: View {
+    /// First day of the displayed month.
+    @Binding var month: Date
+    let selected: Date?
+    let marks: (Date) -> Interview.DayMarks
+    let onSelect: (Date) -> Void
+    var cellHeight: CGFloat = 34
+    private let cal = Calendar.current
+
     private var days: [Date?] {
-        let month = state.displayedMonth
         guard let range = cal.range(of: .day, in: .month, for: month) else { return [] }
         let firstWeekday = cal.component(.weekday, from: month)
         let leading = (firstWeekday - cal.firstWeekday + 7) % 7
@@ -107,7 +145,7 @@ private struct MonthCalendar: View {
                 Button { shift(-1) } label: { Image(systemName: "chevron.left") }
                     .accessibilityLabel(L10n.tr("schedule.prevMonth"))
                 Spacer()
-                Text(state.displayedMonth.formatted(.dateTime.year().month(.wide)))
+                Text(month.formatted(.dateTime.year().month(.wide)))
                     .font(.headline)
                 Spacer()
                 Button { shift(1) } label: { Image(systemName: "chevron.right") }
@@ -121,65 +159,64 @@ private struct MonthCalendar: View {
                     Text(s).font(.caption).foregroundStyle(.secondary)
                 }
                 ForEach(Array(days.enumerated()), id: \.offset) { _, day in
-                    if let day { DayCell(day: day, count: count(on: day), state: state) } else { Color.clear.frame(height: 34) }
+                    if let day {
+                        DayCell(day: day, marks: marks(day), height: cellHeight,
+                                selected: selected.map { cal.isDate($0, inSameDayAs: day) } ?? false) { onSelect(day) }
+                    } else {
+                        Color.clear.frame(height: cellHeight)
+                    }
                 }
             }
-
-            HStack {
-                Button(L10n.tr("schedule.today")) {
-                    state.displayedMonth = cal.dateInterval(of: .month, for: Date())?.start ?? Date()
-                    state.selectedDay = cal.startOfDay(for: Date())
-                }
-                Spacer()
-                if state.selectedDay != nil {
-                    Button(L10n.tr("schedule.showUpcoming")) { state.selectedDay = nil }
-                }
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(Theme.accent)
-            .font(.callout)
         }
     }
 
-    private func count(on day: Date) -> Int {
-        store.interviews.filter { cal.isDate($0.start, inSameDayAs: day) }.count
-    }
-
     private func shift(_ months: Int) {
-        state.displayedMonth = cal.date(byAdding: .month, value: months, to: state.displayedMonth) ?? state.displayedMonth
+        month = cal.date(byAdding: .month, value: months, to: month) ?? month
     }
 }
 
 private struct DayCell: View {
     let day: Date
-    let count: Int
-    @ObservedObject var state: ScheduleState
+    let marks: Interview.DayMarks
+    let height: CGFloat
+    let selected: Bool
+    let action: () -> Void
     private let cal = Calendar.current
 
     var body: some View {
-        let selected = state.selectedDay.map { cal.isDate($0, inSameDayAs: day) } ?? false
         let today = cal.isDateInToday(day)
-        Button {
-            state.selectedDay = selected ? nil : cal.startOfDay(for: day)
-        } label: {
+        Button(action: action) {
             VStack(spacing: 2) {
                 Text("\(cal.component(.day, from: day))")
                     .font(.callout.weight(today ? .bold : .regular))
                     .foregroundStyle(selected ? Color.white : (today ? Theme.accent : Color.primary))
                 HStack(spacing: 2) {
-                    ForEach(0..<min(count, 3), id: \.self) { _ in
-                        Circle().fill(selected ? Color.white : Theme.pink).frame(width: 5, height: 5)
+                    // Upcoming first, then ended, at most 3 dots in all.
+                    let upcoming = min(marks.upcoming, 3), ended = min(marks.ended, 3 - upcoming)
+                    ForEach(0..<upcoming, id: \.self) { _ in
+                        Circle().fill(selected ? Color.white : Theme.periwinkle).frame(width: 5, height: 5)
+                    }
+                    ForEach(0..<ended, id: \.self) { _ in
+                        Circle().fill(selected ? Color.white.opacity(0.55) : Theme.endedMark).frame(width: 5, height: 5)
                     }
                 }
                 .frame(height: 4)
             }
-            .frame(maxWidth: .infinity, minHeight: 34)
-            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selected ? Theme.accent : (today ? Theme.accent.opacity(0.1) : Color.clear)))
+            .frame(maxWidth: .infinity, minHeight: height)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(background(today: today)))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(day.formatted(date: .complete, time: .omitted))
-        .accessibilityValue(count > 0 ? L10n.tr("schedule.a11y.count", [String(count)]) : "")
+        .accessibilityValue(marks.total > 0 ? L10n.tr("schedule.a11y.count", [String(marks.total)]) : "")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func background(today: Bool) -> Color {
+        if selected { return Theme.control }
+        if today { return Theme.selection }
+        if marks.upcoming == 0 && marks.ended > 0 { return Theme.endedDay }
+        return .clear
     }
 }
 
@@ -236,6 +273,7 @@ private struct InterviewRow: View {
         let canRecord = !isPast && interview.start.addingTimeInterval(-Interview.matchMargin) <= now
 
         HStack(alignment: .top, spacing: 12) {
+            // Ended interviews: time and details faded; the buttons stay normal so they don't look disabled.
             VStack(alignment: .trailing, spacing: 2) {
                 Text(interview.start.formatted(date: .omitted, time: .shortened)).font(.headline.monospacedDigit())
                 Text(interview.end.formatted(date: .omitted, time: .shortened)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
@@ -245,14 +283,15 @@ private struct InterviewRow: View {
                 }
             }
             .frame(width: 76, alignment: .trailing)
+            .opacity(isPast ? 0.5 : 1)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     Text(app?.displayCompany ?? L10n.tr("app.untitledCompany")).font(.headline)
                     if !interview.round.isEmpty {
-                        Pill(text: interview.round, color: Theme.accent)
+                        Pill(text: interview.round, color: isPast ? Theme.neutral : Theme.accent)
                     }
-                    if isPast { Text(L10n.tr("schedule.ended")).font(.caption).foregroundStyle(.secondary) }
+                    if isPast { Pill(text: L10n.tr("schedule.ended"), color: Theme.neutral) }
                 }
                 Text(app?.displayRole ?? "").foregroundStyle(.secondary)
                 HStack(spacing: 10) {
@@ -270,6 +309,7 @@ private struct InterviewRow: View {
                     Text(interview.notes).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 }
             }
+            .opacity(isPast ? 0.5 : 1)
             Spacer()
             VStack(alignment: .trailing, spacing: 6) {
                 Button(L10n.tr("schedule.edit")) {
@@ -280,7 +320,7 @@ private struct InterviewRow: View {
                 }
                 if canRecord && !recorder.isRecording {
                     Button(L10n.tr("action.start")) { recorder.requestStart(linkTo: interview.id) }
-                        .tint(.red)
+                        .tint(Theme.dangerFill)
                 }
             }
             .controlSize(.small)
@@ -291,9 +331,10 @@ private struct InterviewRow: View {
 
 // MARK: - Editor
 
-private struct InterviewEditor: View {
+struct InterviewEditor: View {
     @ObservedObject var store: AppStore
     @ObservedObject var state: ScheduleState
+    @Environment(\.colorScheme) private var colorScheme
     private static let roundSuggestions = ["schedule.round.1", "schedule.round.2", "schedule.round.3", "schedule.round.hr", "schedule.round.final"]
 
     private var draft: Binding<InterviewDraft> {
@@ -337,15 +378,28 @@ private struct InterviewEditor: View {
                 }
 
                 Section {
-                    DatePicker(L10n.tr("schedule.field.start"), selection: draft.interview.start,
-                               displayedComponents: [.date, .hourAndMinute])
-                    Picker(L10n.tr("schedule.field.duration"), selection: draft.interview.durationMinutes) {
-                        ForEach(Interview.durationChoices, id: \.self) { Text(L10n.tr("time.minutes", [String($0)])).tag($0) }
+                    timeSummary
+                    MonthGrid(month: editorMonth, selected: draft.wrappedValue.interview.start,
+                              marks: { store.interviewMarks(on: $0) }, onSelect: setDay, cellHeight: 38)
+                        .padding(.vertical, 4)
+                    LabeledContent(L10n.tr("schedule.field.timeOfDay")) { timePickers }
+                    quickTimes
+                    LabeledContent(L10n.tr("schedule.field.duration")) {
+                        SegmentedControl(selection: draft.interview.durationMinutes, options: Interview.durationChoices.map {
+                            .init(value: $0, title: L10n.tr("time.minutes", [String($0)]))
+                        })
                     }
-                    Picker(L10n.tr("schedule.field.format"), selection: draft.interview.format) {
-                        ForEach(Interview.Format.allCases) { Label($0.title, systemImage: $0.icon).tag($0) }
+                } header: {
+                    Text(L10n.tr("schedule.field.start"))
+                }
+
+                Section {
+                    LabeledContent(L10n.tr("schedule.field.format")) {
+                        SegmentedControl(selection: draft.interview.format, options: Interview.Format.allCases.map {
+                            .init(value: $0, title: $0.title, icon: $0.icon)
+                        })
+                        .frame(maxWidth: 300)
                     }
-                    .pickerStyle(.segmented)
                     switch draft.wrappedValue.interview.format {
                     case .online:
                         TextField(L10n.tr("schedule.field.link"), text: draft.interview.meetingLink,
@@ -361,6 +415,7 @@ private struct InterviewEditor: View {
                     ForEach(Interview.reminderChoices, id: \.self) { minutes in
                         Toggle(L10n.tr("schedule.reminderBefore", [ReminderScheduler.leadTime(minutes)]),
                                isOn: reminderBinding(minutes))
+                            .toggleStyle(.brandSwitch)
                     }
                 } header: {
                     Text(L10n.tr("schedule.field.reminders"))
@@ -377,6 +432,8 @@ private struct InterviewEditor: View {
                 }
             }
             .formStyle(.grouped)
+            // A sheet is its own window: hide the grey form background here too (dark mode).
+            .scrollContentBackground(colorScheme == .dark ? .hidden : .automatic)
 
             Divider()
             HStack {
@@ -387,12 +444,96 @@ private struct InterviewEditor: View {
                 Button(L10n.tr("action.cancel")) { state.draft = nil }
                     .keyboardShortcut(.cancelAction)
                 Button(L10n.tr("ai.key.save")) { save() }
+                    .buttonStyle(.brand)
                     .keyboardShortcut(.defaultAction)
                     .disabled(!canSave)
             }
             .padding(12)
         }
-        .frame(width: 520, height: 640)
+        .frame(width: 560, height: 720)
+        .buttonStyle(.soft)
+        .background(Theme.windowBackground)
+        .presentationBackground(Theme.windowBackground)
+        .onAppear { state.editorMonth = nil }
+    }
+
+    // MARK: Start time
+
+    private let cal = Calendar.current
+    private static let quickTimeChoices = [(9, 0), (10, 0), (11, 0), (14, 0), (15, 0), (16, 0), (19, 0)]
+
+    private var start: Date { draft.wrappedValue.interview.start }
+
+    /// "11月20日 星期四" and "14:00 – 15:00", large, so the choice is obvious at a glance.
+    private var timeSummary: some View {
+        let end = draft.wrappedValue.interview.end
+        return VStack(alignment: .leading, spacing: 2) {
+            Text(start.formatted(.dateTime.month(.wide).day().weekday(.wide).locale(L10n.locale)))
+                .font(.title3.weight(.semibold))
+            // 24-hour, matching the hour / minute pickers below.
+            Text("\(Self.clock(start, cal)) – \(Self.clock(end, cal))")
+                .font(.title3.monospacedDigit())
+                .foregroundStyle(Theme.accent)
+        }
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// The calendar follows the chosen date unless the user pages to another month.
+    private var editorMonth: Binding<Date> {
+        Binding(get: { state.editorMonth ?? cal.dateInterval(of: .month, for: start)?.start ?? start },
+                set: { state.editorMonth = $0 })
+    }
+
+    private var hour: Int { cal.component(.hour, from: start) }
+    private var minute: Int { cal.component(.minute, from: start) }
+
+    private var timePickers: some View {
+        // Every 5 minutes, plus the current minute if it's in between (e.g. from an older entry).
+        let minutes = Array(Set(Array(stride(from: 0, to: 60, by: 5)) + [minute])).sorted()
+        return HStack(spacing: 4) {
+            Picker(L10n.tr("schedule.field.hour"), selection: Binding(get: { hour }, set: { setTime($0, minute) })) {
+                ForEach(0..<24, id: \.self) { Text(String(format: "%02d", $0)).tag($0) }
+            }
+            .labelsHidden().fixedSize()
+            Text(":").font(.title3.monospacedDigit())
+            Picker(L10n.tr("schedule.field.minute"), selection: Binding(get: { minute }, set: { setTime(hour, $0) })) {
+                ForEach(minutes, id: \.self) { Text(String(format: "%02d", $0)).tag($0) }
+            }
+            .labelsHidden().fixedSize()
+        }
+    }
+
+    /// One click for the usual interview slots.
+    private var quickTimes: some View {
+        LabeledContent(L10n.tr("schedule.field.quickTimes")) {
+            HStack(spacing: 6) {
+                ForEach(Self.quickTimeChoices, id: \.0) { h, m in
+                    let chosen = hour == h && minute == m
+                    Button(String(format: "%02d:%02d", h, m)) { setTime(h, m) }
+                        .buttonStyle(.plain)
+                        .font(.callout.monospacedDigit().weight(chosen ? .semibold : .regular))
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(Capsule().fill(chosen ? Theme.control : Theme.selection))
+                        .foregroundStyle(chosen ? Color.white : Theme.accent)
+                        .accessibilityAddTraits(chosen ? .isSelected : [])
+                }
+            }
+        }
+    }
+
+    static func clock(_ date: Date, _ cal: Calendar) -> String {
+        String(format: "%02d:%02d", cal.component(.hour, from: date), cal.component(.minute, from: date))
+    }
+
+    private func setDay(_ day: Date) {
+        guard let new = cal.date(bySettingHour: hour, minute: minute, second: 0, of: day) else { return }
+        state.draft?.interview.start = new
+    }
+
+    private func setTime(_ h: Int, _ m: Int) {
+        guard let new = cal.date(bySettingHour: h, minute: m, second: 0, of: start) else { return }
+        state.draft?.interview.start = new
     }
 
     /// nil = "新建岗位…"
