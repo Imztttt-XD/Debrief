@@ -5,11 +5,20 @@ struct AIError: LocalizedError {
     /// Rate limits (429), server errors (5xx) and network failures are worth retrying;
     /// a bad key or model name is not.
     var retryable = false
+    var status = 0
+    /// The server's Retry-After, in seconds, when it sent one.
+    var retryAfter: TimeInterval?
     var errorDescription: String? { message }
+    var isRateLimit: Bool { status == 429 }
 
-    static func http(_ status: Int, _ detail: String) -> AIError {
+    static func http(_ status: Int, _ detail: String, retryAfter: TimeInterval? = nil) -> AIError {
         AIError(message: L10n.tr("error.ai.http", [String(status), detail]),
-                retryable: status == 429 || status >= 500)
+                retryable: status == 429 || status >= 500, status: status, retryAfter: retryAfter)
+    }
+
+    /// Retry-After in seconds (the HTTP-date form is rare for APIs and ignored).
+    static func retryAfter(_ response: URLResponse) -> TimeInterval? {
+        (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init)
     }
 }
 
@@ -21,6 +30,8 @@ struct OpenAICompatibleClient {
     /// Longest silence allowed on the connection (not the total time). With streaming, a model
     /// that's still working keeps sending data, so this only fires when it has really stalled.
     var timeout: TimeInterval = 180
+    /// Told the token usage of each successful request (UsageLedger). Set by AISettings.client(for:).
+    var onUsage: (@Sendable (TokenUsage) -> Void)?
 
     /// Long generations (reasoning models writing a multi-question critique) can take many
     /// minutes in total; only the per-request idle timeout above should cut them off.
@@ -44,6 +55,8 @@ struct OpenAICompatibleClient {
             "model": model,
             "messages": messages.map { ["role": $0.role, "content": $0.content] },
             "stream": true,
+            // Ask for token usage in the last chunk (OpenAI-compatible; DeepSeek and DashScope support it).
+            "stream_options": ["include_usage": true],
         ]
         if let maxTokens { body["max_tokens"] = maxTokens }
         if jsonOutput { body["response_format"] = ["type": "json_object"] }
@@ -54,7 +67,7 @@ struct OpenAICompatibleClient {
             var data = Data()
             for try await byte in bytes { data.append(byte); if data.count > 4096 { break } }
             let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            throw AIError.http(status, Self.errorDetail(json: json, data: data))
+            throw AIError.http(status, Self.errorDetail(json: json, data: data), retryAfter: AIError.retryAfter(response))
         }
 
         // Server-sent events: "data: {json}" lines, ending with "data: [DONE]". Lines starting
@@ -62,12 +75,14 @@ struct OpenAICompatibleClient {
         // (ignored here), then `content`.
         var content = ""
         var finishReason: String?
+        var usage: TokenUsage?
         do {
             for try await line in bytes.lines {
                 guard line.hasPrefix("data:") else { continue }
                 let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
                 if payload == "[DONE]" { break }
                 guard let json = (try? JSONSerialization.jsonObject(with: Data(payload.utf8))) as? [String: Any] else { continue }
+                if let u = TokenUsage.parse(json["usage"]) { usage = u }
                 if let error = json["error"] as? [String: Any] {
                     throw AIError(message: L10n.tr("error.ai.http", [String(status), (error["message"] as? String) ?? payload]))
                 }
@@ -82,6 +97,7 @@ struct OpenAICompatibleClient {
         } catch {
             throw Self.networkError(error)
         }
+        if let usage { onUsage?(usage) }
         if finishReason == "length" && !allowTruncated {
             throw AIError(message: L10n.tr("error.ai.truncated"))
         }
@@ -113,6 +129,7 @@ struct OpenAICompatibleClient {
 
     private func completionText(_ body: [String: Any]) async throws -> String {
         let json = try await post("chat/completions", body: body)
+        if let usage = TokenUsage.parse(json["usage"]) { onUsage?(usage) }
         guard let choices = json["choices"] as? [[String: Any]],
               let message = choices.first?["message"] as? [String: Any] else {
             throw AIError(message: L10n.tr("error.ai.badResponse"))
@@ -141,7 +158,7 @@ struct OpenAICompatibleClient {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         guard (200..<300).contains(status) else {
-            throw AIError.http(status, Self.errorDetail(json: json, data: data))
+            throw AIError.http(status, Self.errorDetail(json: json, data: data), retryAfter: AIError.retryAfter(response))
         }
         guard let json else { throw AIError(message: L10n.tr("error.ai.badResponse")) }
         return json
@@ -189,7 +206,12 @@ extension AISettings {
         guard let key = Keychain.get(account.id), !key.isEmpty else {
             throw AIError(message: L10n.tr("ai.noKey", [account.name]))
         }
-        return (OpenAICompatibleClient(baseURL: url, apiKey: key), model)
+        var client = OpenAICompatibleClient(baseURL: url, apiKey: key)
+        let provider = account.name
+        client.onUsage = { usage in
+            Task { @MainActor in UsageLedger.shared.record(usage, function: function, provider: provider, model: model) }
+        }
+        return (client, model)
     }
 }
 
@@ -197,6 +219,11 @@ extension AISettings {
 /// region or URL shows up here instead of in the middle of a review.
 enum ConnectionCheck {
     static func run(_ function: AIFunction, settings: AISettings) async throws -> String {
+        if function.isTranscription, settings.usesLocalTranscription, #available(macOS 26, *) {
+            // Nothing to call: make sure the language is supported and its model is downloaded.
+            let locale = try await LocalTranscriber.prepare()
+            return L10n.tr("local.ready", [locale.identifier])
+        }
         let (client, model) = try settings.client(for: function)
         if function.isTranscription {
             _ = try await client.transcribe(wav: testTone(), model: model)

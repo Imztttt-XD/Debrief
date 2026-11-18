@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let reminders = ReminderScheduler()
     lazy var engine = ReviewEngine(store: store)
     lazy var mockEngine = MockEngine(store: store)
+    lazy var practice = PracticeEngine(store: store)
     private var floatingButton: FloatingButtonController?
     func applicationDidFinishLaunching(_ notification: Notification) {
         if DevSnapshots.outputDir != nil {
@@ -77,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Quitting mid-recording still produces a finished .m4a.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         store.flush()
+        UsageLedger.shared.save()
         guard recorder.isRecording else { return .terminateNow }
         Task {
             await recorder.stop(reason: .quitting)
@@ -113,7 +115,8 @@ struct DebriefApp: App {
     var body: some Scene {
         Window(Text(L10n.tr("app.name")), id: "main") {
             MainView(recorder: appDelegate.recorder, store: appDelegate.store, nav: appDelegate.nav,
-                     reminders: appDelegate.reminders, engine: appDelegate.engine, mockEngine: appDelegate.mockEngine)
+                     reminders: appDelegate.reminders, engine: appDelegate.engine, mockEngine: appDelegate.mockEngine,
+                     practice: appDelegate.practice)
         }
         .defaultSize(width: 1100, height: 720)
 
