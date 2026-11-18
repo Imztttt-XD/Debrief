@@ -104,7 +104,12 @@ final class AppStore: ObservableObject {
         saveMock(session.id)
     }
 
+    /// Also takes its questions back out of the question bank (see QuestionBank.removeContributions).
     func deleteMock(_ id: UUID) {
+        if bank.ingestedMocks.contains(id), let session = mocks[id] {
+            bank.removeContributions(of: id, questions: session.questions, kind: .mock, date: session.createdAt)
+            bank.ingestedMocks.removeAll { $0 == id }
+        }
         pendingMockSaves[id]?.cancel()
         mocks[id] = nil
         try? FileManager.default.removeItem(at: AppPaths.mocks.appendingPathComponent("\(id.uuidString).json"))
@@ -129,23 +134,26 @@ final class AppStore: ObservableObject {
     // MARK: Question bank
 
     /// Adds critiqued questions to the bank (merge rules: QuestionBank.merge in Bank/BankMerge.swift).
-    func ingest(_ questions: [ReviewQuestion], source: BankQuestion.Source, applicationID: UUID?, at date: Date) {
+    func ingest(_ questions: [ReviewQuestion], source: BankQuestion.Source, applicationID: UUID?, at date: Date,
+                sourceID: UUID? = nil) {
         let app = application(applicationID)
         bank.merge(questions, source: source, applicationID: applicationID,
-                   company: app?.company ?? "", role: app?.role ?? "", at: date)
+                   company: app?.company ?? "", role: app?.role ?? "", at: date, sourceID: sourceID)
     }
 
     /// Adds a finished review's questions once.
     func ingestReview(_ recordingID: UUID) {
         guard !bank.ingestedReviews.contains(recordingID), let review = reviews[recordingID], review.isAnalyzed,
               let record = recordings.first(where: { $0.id == recordingID }) else { return }
-        ingest(review.questions, source: .interview, applicationID: interview(record.interviewID)?.applicationID, at: record.startedAt)
+        ingest(review.questions, source: .interview, applicationID: interview(record.interviewID)?.applicationID,
+               at: record.startedAt, sourceID: recordingID)
         bank.ingestedReviews.append(recordingID)
     }
 
     func ingestMock(_ id: UUID) {
         guard !bank.ingestedMocks.contains(id), let session = mocks[id], session.summary != nil else { return }
-        ingest(session.questions, source: .mock, applicationID: session.applicationID, at: session.createdAt)
+        ingest(session.questions, source: .mock, applicationID: session.applicationID, at: session.createdAt,
+               sourceID: id)
         bank.ingestedMocks.append(id)
     }
 
@@ -191,6 +199,42 @@ final class AppStore: ObservableObject {
         guard reviews[recordingID] != nil else { return nil }
         return Binding(get: { [weak self] in self?.reviews[recordingID] ?? Review(recordingID: recordingID) },
                        set: { [weak self] new in self?.updateReview(recordingID) { $0 = new } })
+    }
+
+    /// Removes the transcript and analysis of a recording; the recording itself stays and can
+    /// be reviewed again. The questions this review added to the bank are taken back out
+    /// (QuestionBank.removeContributions), and it leaves `ingestedReviews`, so reviewing it again
+    /// adds them again.
+    func deleteReview(_ recordingID: UUID) {
+        if bank.ingestedReviews.contains(recordingID), let review = reviews[recordingID] {
+            let date = recordings.first { $0.id == recordingID }?.startedAt ?? review.createdAt
+            bank.removeContributions(of: recordingID, questions: review.questions, kind: .interview, date: date)
+            bank.ingestedReviews.removeAll { $0 == recordingID }
+        }
+        pendingReviewSaves[recordingID]?.cancel()
+        pendingReviewSaves[recordingID] = nil
+        reviews[recordingID] = nil
+        try? FileManager.default.removeItem(at: AppPaths.reviews.appendingPathComponent("\(recordingID.uuidString).json"))
+    }
+
+    /// Moves the recording's audio files to the Trash (so a mistake can be undone in Finder)
+    /// and removes it and its review from the app. Files already gone are skipped; if one
+    /// can't be moved, the recording stays in the app and the error is thrown.
+    /// Returns where the files went in the Trash.
+    @discardableResult
+    func deleteRecording(_ id: UUID) throws -> [URL] {
+        guard let record = recordings.first(where: { $0.id == id }) else { return [] }
+        let files = [record.fileURL, record.tracksFileURL].compactMap { $0 }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+        var trashed: [URL] = []
+        for url in files {
+            var result: NSURL?
+            try FileManager.default.trashItem(at: url, resultingItemURL: &result)
+            if let result { trashed.append(result as URL) }
+        }
+        deleteReview(id)
+        recordings.removeAll { $0.id == id }
+        return trashed
     }
 
     private func scheduleReviewSave(_ id: UUID) {
@@ -278,6 +322,10 @@ final class AppStore: ObservableObject {
     func deleteInterview(_ id: UUID) {
         interviews.removeAll { $0.id == id }
         unlinkRecordings(from: [id])
+    }
+
+    func interviewMarks(on day: Date) -> Interview.DayMarks {
+        Interview.marks(interviews, on: day, now: Date())
     }
 
     func interviews(for applicationID: UUID) -> [Interview] {

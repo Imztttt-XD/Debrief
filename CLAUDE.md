@@ -21,7 +21,7 @@ swift build                 # 编译，必须零 error；不要新增 warning
 - **用户界面文案不能硬编码。** 所有文案都写在 `scripts/gen_strings.py` 的表里（简中、繁中、英文、日文四列都要填），再运行 `python3 scripts/gen_strings.py Resources`，代码里用 `L10n.tr("key")`。生成出来的 `.strings` 文件不要手改。
 - **不碰真实数据。** 任何会读写数据的运行和测试都要设置 `DEBRIEF_DATA_DIR` 指向临时目录。不要删除、移动 `~/Library/Application Support/Debrief/` 和 `~/Movies/Debrief/` 下的文件。
 - **先问再改**：Bundle ID、Keychain service 名称、`Info.plist` 权限描述、数据文件名或 JSON 结构。这些一改，用户已有的权限、密钥或数据就会失效。
-- 改 `Codable` 模型时，新字段必须有默认值，旧 JSON 要能继续解码；解码失败会把整个文件当作损坏处理。
+- 改 `Codable` 模型时，新字段必须声明为 Optional（或手写 `init(from:)`）。自动合成的解码不会使用属性默认值，旧 JSON 缺这个 key 就会解码失败，整个文件会被当作损坏处理。加字段时补一个“用旧 JSON 解码”的测试（参考 `ReviewScheduleTests.decodesBankWithoutSchedulingFields`）。
 
 ## 3. 代码规范
 
@@ -29,7 +29,13 @@ swift build                 # 编译，必须零 error；不要新增 warning
 - 可测试的业务逻辑写成纯函数或值类型上的方法，不要写进 View 或 `AppStore`。参考 `Bank/BankMerge.swift`：`AppStore` 只负责调用和保存。
 - 改动或新增业务逻辑时，同时在 `Tests/DebriefTests/` 加测试或更新测试（Swift Testing：`@Test`、`#expect`）。边界值（时间窗口的两端、阈值的两侧）要单独写用例。
 - 改 `RecorderCore` 时，要确认 `RecorderSelfTest` 仍然全部 PASS。
-- 不要引入第三方依赖，除非用户明确同意。
+- 不要引入第三方依赖，除非用户明确同意。已同意的只有 sherpa-onnx（实验性的说话人区分，见 THIRD_PARTY_NOTICES.md）；它的库文件不进 git，运行时动态加载，没有它时 App 必须照常编译和运行。
+- **不要直接用会显示强调色的系统控件**：macOS 会把自定义 `.tint` 渲染成很深的靛紫色，和浅蓝紫主色不符（Command Line Tools 又编译不了 AccentColor 资源）。改用 `UI/Controls.swift` 和 `UI/Theme.swift` 里的版本：
+  - 实心按钮用 `.buttonStyle(.brand)`，不用 `.borderedProminent`；普通按钮默认是 `.soft`（`MainView` 和弹窗根视图上统一设置），新建弹窗时也要在根视图加上 `.buttonStyle(.soft)`；
+  - 分段选择用 `SegmentedControl`，不用 `.pickerStyle(.segmented)`；
+  - 表单（`Form`）之外的下拉选择用 `MenuPicker`；文字菜单加 `.menuStyle(.button).buttonStyle(.menuField)`；
+  - 勾选框和开关用 `.toggleStyle(.brandCheckbox)` / `.toggleStyle(.brandSwitch)`，滑块用 `BrandSlider`，进度条用 `BrandProgressBar`。
+- 颜色只用 `Theme` 里的值（`accent`、`success`、`warning`、`danger`、`neutral` 等），不要在页面里写 `.red`、`.orange` 或十六进制色值。
 
 ## 4. App 内 LLM 输出的处理规范
 

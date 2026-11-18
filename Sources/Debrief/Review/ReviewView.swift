@@ -1,6 +1,7 @@
 import AVFoundation
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Plays the recording so any line or question can be heard from its timestamp.
 @MainActor
@@ -49,18 +50,97 @@ final class AudioPlayerModel: ObservableObject {
 }
 
 /// 复盘: recordings on the left, the selected recording's review on the right.
+/// Imports audio / video files as recordings (see RecordingImporter), several at once.
+@MainActor
+final class ImportState: ObservableObject {
+    @Published private(set) var inProgress = 0
+    @Published var error: String?
+
+    func run(_ urls: [URL], into folder: URL, store: AppStore, nav: NavigationModel) {
+        for url in urls {
+            inProgress += 1
+            Task {
+                defer { inProgress -= 1 }
+                do {
+                    var record = try await RecordingImporter.importFile(url, into: folder)
+                    record.interviewID = store.interviewCandidates(at: record.startedAt).first?.id
+                    store.add(record)
+                    nav.selectedRecordingID = record.id
+                    error = nil
+                } catch {
+                    self.error = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func pick(into folder: URL, store: AppStore, nav: NavigationModel) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = RecordingImporter.allowedTypes
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.message = L10n.tr("import.panelMessage")
+        guard panel.runModal() == .OK else { return }
+        run(panel.urls, into: folder, store: store, nav: nav)
+    }
+}
+
 struct ReviewView: View {
     @ObservedObject var store: AppStore
     @ObservedObject var engine: ReviewEngine
     @ObservedObject var nav: NavigationModel
+    /// Where imported files are copied: the recordings folder.
+    let recordingsFolder: URL
     @StateObject private var player = AudioPlayerModel()
+    @StateObject private var importer = ImportState()
 
     var body: some View {
         HSplitView {
+            VStack(spacing: 0) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Button { importer.pick(into: recordingsFolder, store: store, nav: nav) } label: {
+                            Label(L10n.tr("import.button"), systemImage: "square.and.arrow.down").frame(maxWidth: .infinity)
+                        }
+                        if importer.inProgress > 0 { ProgressView().controlSize(.small) }
+                    }
+                    if let error = importer.error {
+                        Text(error).font(.caption).foregroundStyle(Theme.danger).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(10)
+                Divider()
+                recordingList
+            }
+            .frame(minWidth: 210, idealWidth: 260, maxWidth: 340)
+            // Drop audio or video files anywhere on the list to import them.
+            .dropDestination(for: URL.self) { urls, _ in
+                let files = urls.filter { url in
+                    let type = UTType(filenameExtension: url.pathExtension)
+                    return RecordingImporter.allowedTypes.contains { type?.conforms(to: $0) == true }
+                }
+                guard !files.isEmpty else { return false }
+                importer.run(files, into: recordingsFolder, store: store, nav: nav)
+                return true
+            }
+
+            detailPane
+        }
+        .onAppear {
+            // Coming back to this page: keep a recording selected.
+            if !store.recordings.contains(where: { $0.id == nav.selectedRecordingID }) {
+                nav.selectedRecordingID = store.recordings.max { $0.startedAt < $1.startedAt }?.id
+            }
+        }
+        .onDisappear { player.stop() }
+    }
+
+    private var recordingList: some View {
             List {
                 ForEach(store.recordings.sorted { $0.startedAt > $1.startedAt }) { rec in
                     RecordingListRow(record: rec, store: store, engine: engine)
                         .selectableRow(nav.selectedRecordingID == rec.id) { nav.selectedRecordingID = rec.id }
+                        .contextMenu { deleteMenuItems(rec) }
                 }
             }
             .listStyle(.inset)
@@ -70,11 +150,13 @@ struct ReviewView: View {
                         .multilineTextAlignment(.center)
                 }
             }
-            .frame(minWidth: 210, idealWidth: 260, maxWidth: 340)
+    }
 
+    private var detailPane: some View {
             Group {
                 if let id = nav.selectedRecordingID, let record = store.recordings.first(where: { $0.id == id }) {
-                    ReviewDetail(record: record, store: store, engine: engine, player: player)
+                    ReviewDetail(record: record, store: store, engine: engine, player: player,
+                                 deleteMenu: AnyView(deleteMenuItems(record)))
                         .id(id)
                 } else {
                     Text(L10n.tr("review.select")).foregroundStyle(.secondary)
@@ -82,14 +164,26 @@ struct ReviewView: View {
                 }
             }
             .frame(minWidth: 440, maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Shared by the list's right-click menu and the detail header's delete menu.
+    @ViewBuilder private func deleteMenuItems(_ record: RecordingRecord) -> some View {
+        let busy = engine.isRunning(record.id)
+        Button(L10n.tr("review.delete")) {
+            RecordingDeletion.deleteReview(record, store: store)
         }
-        .onAppear {
-            // Coming back to this page: keep a recording selected.
-            if !store.recordings.contains(where: { $0.id == nav.selectedRecordingID }) {
+        .disabled(busy || store.review(for: record.id) == nil)
+        Button(L10n.tr("recording.delete"), role: .destructive) {
+            if nav.selectedRecordingID == record.id { player.stop() }
+            guard RecordingDeletion.deleteRecording(record, store: store) else { return }
+            if nav.selectedRecordingID == record.id {
                 nav.selectedRecordingID = store.recordings.max { $0.startedAt < $1.startedAt }?.id
             }
         }
-        .onDisappear { player.stop() }
+        .disabled(busy)
+        if busy {
+            Text(L10n.tr("recording.delete.busy"))
+        }
     }
 }
 
@@ -118,12 +212,12 @@ private struct RecordingListRow: View {
 
     @ViewBuilder private var status: some View {
         if let phase = engine.running[record.id] {
-            Label(phase.text, systemImage: "hourglass").foregroundStyle(.orange)
+            Label(phase.text, systemImage: "hourglass").foregroundStyle(Theme.warning)
         } else if let review = store.review(for: record.id) {
             if review.lastError != nil {
-                Label(L10n.tr("review.status.failed"), systemImage: "exclamationmark.triangle").foregroundStyle(.red)
+                Label(L10n.tr("review.status.failed"), systemImage: "exclamationmark.triangle").foregroundStyle(Theme.danger)
             } else if review.isAnalyzed {
-                Label(L10n.tr("review.status.done"), systemImage: "checkmark.circle").foregroundStyle(.green)
+                Label(L10n.tr("review.status.done"), systemImage: "checkmark.circle").foregroundStyle(Theme.success)
             } else if review.isTranscribed {
                 Label(L10n.tr("review.status.transcribed"), systemImage: "text.alignleft").foregroundStyle(.secondary)
             } else {
@@ -156,6 +250,8 @@ private struct ReviewDetail: View {
     @ObservedObject var store: AppStore
     @ObservedObject var engine: ReviewEngine
     @ObservedObject var player: AudioPlayerModel
+    /// 删除复盘记录 / 删除录音, from ReviewView.
+    let deleteMenu: AnyView
     @AppStorage("reviewTab") private var tab = "questions"
     @StateObject private var feedback = ExportFeedback()
 
@@ -165,7 +261,7 @@ private struct ReviewDetail: View {
 
     @ViewBuilder private func exportMenu(_ review: Review) -> some View {
         if let message = feedback.message {
-            Label(message, systemImage: "checkmark.circle.fill").font(.callout).foregroundStyle(.green)
+            Label(message, systemImage: "checkmark.circle.fill").font(.callout).foregroundStyle(Theme.success)
         }
         let projectCount = ReviewExporter.questions(in: review, scope: .projects).count
         Menu(L10n.tr("export.menu")) {
@@ -191,6 +287,7 @@ private struct ReviewDetail: View {
                 feedback.show(L10n.tr("export.copied"))
             }
         }
+        .menuStyle(.button).buttonStyle(.menuField)
         .fixedSize()
         .help(L10n.tr("export.help"))
     }
@@ -201,12 +298,12 @@ private struct ReviewDetail: View {
             header(review)
             Divider()
             if let review, review.isTranscribed, let binding = store.reviewBinding(record.id) {
-                Picker("", selection: $tab) {
-                    Text(L10n.tr("review.tab.questions")).tag("questions")
-                    Text(L10n.tr("review.tab.transcript")).tag("transcript")
-                    Text(L10n.tr("review.tab.summary")).tag("summary")
-                }
-                .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 360).padding(10)
+                SegmentedControl(selection: $tab, options: [
+                    .init(value: "questions", title: L10n.tr("review.tab.questions")),
+                    .init(value: "transcript", title: L10n.tr("review.tab.transcript")),
+                    .init(value: "summary", title: L10n.tr("review.tab.summary")),
+                ])
+                .frame(maxWidth: 360).padding(10)
                 switch tab {
                 case "transcript": TranscriptTab(review: binding, player: player)
                 case "summary": SummaryTab(review: binding)
@@ -223,41 +320,64 @@ private struct ReviewDetail: View {
 
     @ViewBuilder private func header(_ review: Review?) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(ReviewText.title(record, store: store))
-                    .font(.title3.bold())
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(record.startedAt.formatted(date: .long, time: .shortened) + " · " + ReviewText.clock(record.duration))
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(ReviewText.title(record, store: store))
+                        .font(.title3.bold())
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(record.startedAt.formatted(date: .long, time: .shortened) + " · " + ReviewText.clock(record.duration))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 12)
+                Menu { deleteMenu } label: { Image(systemName: "trash") }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
                     .foregroundStyle(.secondary)
+                    .help(L10n.tr("action.delete"))
+                    .accessibilityLabel(L10n.tr("action.delete"))
             }
             if let phase = engine.running[record.id] {
                 HStack(spacing: 10) {
-                    if let f = phase.fraction { ProgressView(value: f).frame(maxWidth: 160) } else { ProgressView().controlSize(.small) }
+                    if let f = phase.fraction { BrandProgressBar(value: f).frame(maxWidth: 160) } else { ProgressView().controlSize(.small) }
                     Text(phase.text).font(.callout).foregroundStyle(.secondary)
                     Button(L10n.tr("action.cancel")) { engine.cancel(record.id) }
                 }
             } else if let review, review.isTranscribed {
                 HStack(spacing: 10) {
                     if !review.isAnalyzed {
-                        Button(L10n.tr("review.continue")) { engine.start(record.id) }.buttonStyle(.borderedProminent)
+                        Button(L10n.tr("review.continue")) { engine.start(record.id) }.buttonStyle(.brand)
                     }
                     if !review.questions.isEmpty { exportMenu(review) }
                     Menu(L10n.tr("review.redo")) {
                         Button(L10n.tr("review.reanalyze")) { engine.reanalyze(record.id) }
                         Button(L10n.tr("review.retranscribe")) { engine.retranscribe(record.id) }
                     }
+                    .menuStyle(.button).buttonStyle(.menuField)
                     .fixedSize()
                 }
             }
             if let review, review.isTranscribed, !review.transcript.contains(where: { $0.speaker == .interviewer }) {
                 Label(L10n.tr("review.noSystemAudio"), systemImage: "speaker.slash").font(.callout).foregroundStyle(.secondary)
             }
+            if let review, review.speakersEstimated == true, engine.running[record.id] == nil {
+                HStack(spacing: 10) {
+                    Label(L10n.tr("speakers.estimated"), systemImage: "person.2.wave.2").font(.callout).foregroundStyle(.secondary)
+                    Button(L10n.tr("speakers.swap")) {
+                        store.updateReview(record.id) {
+                            $0.transcript = SpeakerSeparation.swapped($0.transcript)
+                            $0.transcriptEdited = true
+                        }
+                    }
+                    .controlSize(.small)
+                }
+            }
             if let review, review.transcriptEdited, engine.running[record.id] == nil {
-                Label(L10n.tr("review.editedHint"), systemImage: "pencil").font(.callout).foregroundStyle(.orange)
+                Label(L10n.tr("review.editedHint"), systemImage: "pencil").font(.callout).foregroundStyle(Theme.warning)
             }
             if let error = review?.lastError, engine.running[record.id] == nil {
-                Label(error, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(.red)
+                Label(error, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(Theme.danger)
                     .textSelection(.enabled)
             }
             if let review, review.isTranscribed, let tm = review.transcriptModel {
@@ -283,22 +403,42 @@ private struct StartPanel: View {
             Text(L10n.tr("review.start.title")).font(.title3.bold())
             Text(L10n.tr("review.start.detail", [
                 ReviewText.clock(record.duration),
-                (ai.account(asr.accountID)?.name ?? "—") + " / " + asr.model,
+                ai.usesLocalTranscription ? L10n.tr("local.title") : (ai.account(asr.accountID)?.name ?? "—") + " / " + asr.model,
                 (ai.account(llm.accountID)?.name ?? "—") + " / " + llm.model,
             ]))
             .multilineTextAlignment(.center).foregroundStyle(.secondary).frame(maxWidth: 460)
+            // Imported recordings especially may need linking by hand.
+            LabeledContent(L10n.tr("recording.linkedTo")) {
+                MenuPicker(title: L10n.tr("recording.linkedTo"),
+                           selection: Binding(get: { store.recordings.first { $0.id == record.id }?.interviewID },
+                                              set: { store.link(recording: record.id, to: $0) }),
+                           options: InterviewText.linkOptions(near: record.startedAt, store: store))
+            }
+            .frame(maxWidth: 460)
             if record.interviewID == nil {
-                Label(L10n.tr("review.start.unlinked"), systemImage: "link.badge.plus").font(.callout).foregroundStyle(.orange)
+                Label(L10n.tr("review.start.unlinked"), systemImage: "link.badge.plus").font(.callout).foregroundStyle(Theme.warning)
             }
             if record.tracksFileURL == nil || record.tracks.isEmpty {
-                Label(L10n.tr("review.start.noTracks"), systemImage: "person.2.slash").font(.callout).foregroundStyle(.orange)
-                    .multilineTextAlignment(.center).frame(maxWidth: 460)
+                // Single track: say what will happen to the speakers, given the 实验功能 switch.
+                let separation = UserDefaults.standard.bool(forKey: ReviewEngine.speakerSeparationKey)
+                if separation && SpeakerSeparation.isReady {
+                    Label(L10n.tr("review.start.willSeparate"), systemImage: "person.2.wave.2").font(.callout).foregroundStyle(Theme.accent)
+                        .multilineTextAlignment(.center).frame(maxWidth: 460)
+                } else {
+                    Label(L10n.tr(separation ? "review.start.separationNotReady" : "review.start.noTracks"), systemImage: "person.2.slash")
+                        .font(.callout).foregroundStyle(Theme.warning)
+                        .multilineTextAlignment(.center).frame(maxWidth: 460)
+                }
+            }
+            if let saved = store.review(for: record.id)?.transcriptCache?.count, saved > 0, !engine.isRunning(record.id) {
+                Label(L10n.tr("review.start.resume", [String(saved)]), systemImage: "arrow.clockwise").font(.callout)
+                    .foregroundStyle(Theme.accent)
             }
             if engine.isRunning(record.id) {
                 ProgressView()
             } else {
                 Button(L10n.tr("review.start")) { engine.start(record.id) }
-                    .buttonStyle(.borderedProminent).controlSize(.large)
+                    .buttonStyle(.brand).controlSize(.large)
             }
         }
         .padding(30)
@@ -358,7 +498,7 @@ struct QuestionCard: View {
                         .padding(.horizontal, 8).padding(.vertical, 2)
                         .background(Capsule().fill(Theme.brandGradient))
                     Pill(text: question.categoryTitle, color: Theme.accent)
-                    if let item = question.resumeItem { Pill(text: item, color: Color(hex: 0xE0568A)) }
+                    if let item = question.resumeItem { Pill(text: item, color: Theme.neutral) }
                     Spacer()
                     TimeButton(seconds: question.start, player: player)
                 }
@@ -400,23 +540,23 @@ struct CritiqueView: View {
             }
             if !critique.corrections.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Label(L10n.tr("review.corrections"), systemImage: "exclamationmark.bubble").font(.subheadline.bold()).foregroundStyle(.red)
+                    Label(L10n.tr("review.corrections"), systemImage: "exclamationmark.bubble").font(.subheadline.bold()).foregroundStyle(Theme.danger)
                     ForEach($critique.corrections) { $c in
                         VStack(alignment: .leading, spacing: 3) {
-                            Text("“\(c.claim)”").font(.callout).strikethrough(c.disputed == false, color: .red.opacity(0.6))
+                            Text("“\(c.claim)”").font(.callout).strikethrough(c.disputed == false, color: Theme.danger.opacity(0.6))
                             Text(c.issue).font(.callout)
-                            if !c.correct.isEmpty { Text(L10n.tr("review.correctIs", [c.correct])).font(.callout).foregroundStyle(.green) }
-                            Toggle(L10n.tr("review.dispute"), isOn: $c.disputed).toggleStyle(.checkbox).font(.caption)
+                            if !c.correct.isEmpty { Text(L10n.tr("review.correctIs", [c.correct])).font(.callout).foregroundStyle(Theme.success) }
+                            Toggle(L10n.tr("review.dispute"), isOn: $c.disputed).toggleStyle(.brandCheckbox).font(.caption)
                         }
                         .opacity(c.disputed ? 0.5 : 1)
                         .padding(8)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.red.opacity(0.06)))
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Theme.danger.opacity(0.06)))
                     }
                     Text(L10n.tr("review.verifyNote")).font(.caption).foregroundStyle(.secondary)
                 }
             }
-            BulletList(title: L10n.tr("review.strengths"), icon: "hand.thumbsup", color: .green, items: critique.strengths)
-            BulletList(title: L10n.tr("review.improvements"), icon: "arrow.up.right", color: .orange, items: critique.improvements)
+            BulletList(title: L10n.tr("review.strengths"), icon: "hand.thumbsup", color: Theme.success, items: critique.strengths)
+            BulletList(title: L10n.tr("review.improvements"), icon: "arrow.up.right", color: Theme.warning, items: critique.improvements)
             if !critique.betterAnswer.isEmpty {
                 DisclosureGroup(L10n.tr("review.betterAnswer")) {
                     Text(critique.betterAnswer).font(.callout).textSelection(.enabled)
@@ -431,7 +571,7 @@ struct Score: View {
     let title: String
     let value: Int
     var body: some View {
-        let color: Color = value >= 4 ? .green : (value == 3 ? .orange : .red)
+        let color: Color = value >= 4 ? Theme.success : (value == 3 ? Theme.warning : Theme.danger)
         Text("\(title) \(value)/5")
             .font(.caption.weight(.semibold))
             .padding(.horizontal, 7).padding(.vertical, 2)
@@ -480,7 +620,7 @@ private struct TranscriptTab: View {
                         }
                     }
                     .menuStyle(.borderlessButton).fixedSize()
-                    .foregroundStyle(u.speaker == .interviewer ? Color.blue : (u.speaker == .me ? Color.green : Color.secondary))
+                    .foregroundStyle(u.speaker == .interviewer ? Theme.accent : (u.speaker == .me ? Theme.blue : Color.secondary))
                     TextField("", text: Binding(get: { u.text }, set: { u.text = $0; review.transcriptEdited = true }),
                               axis: .vertical)
                         .textFieldStyle(.plain)
@@ -499,9 +639,9 @@ private struct SummaryTab: View {
             VStack(alignment: .leading, spacing: 16) {
                 if let s = review.summary {
                     Text(s.overall).font(.body).textSelection(.enabled)
-                    BulletList(title: L10n.tr("review.strengths"), icon: "hand.thumbsup", color: .green, items: s.strengths)
-                    BulletList(title: L10n.tr("review.improvements"), icon: "arrow.up.right", color: .orange, items: s.improvements)
-                    BulletList(title: L10n.tr("review.actionItems"), icon: "checklist", color: .blue, items: s.actionItems)
+                    BulletList(title: L10n.tr("review.strengths"), icon: "hand.thumbsup", color: Theme.success, items: s.strengths)
+                    BulletList(title: L10n.tr("review.improvements"), icon: "arrow.up.right", color: Theme.warning, items: s.improvements)
+                    BulletList(title: L10n.tr("review.actionItems"), icon: "checklist", color: Theme.accent, items: s.actionItems)
                     if !s.interviewerStyle.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
                             Label(L10n.tr("review.interviewerStyle"), systemImage: "person.bubble").font(.subheadline.bold())
@@ -538,7 +678,7 @@ private struct PlayerBar: View {
             .accessibilityLabel(L10n.tr(player.isPlaying ? "review.pause" : "review.play"))
             Text("\(ReviewText.clock(player.currentTime)) / \(ReviewText.clock(duration))")
                 .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-            ProgressView(value: duration > 0 ? min(1, player.currentTime / duration) : 0)
+            BrandProgressBar(value: duration > 0 ? min(1, player.currentTime / duration) : 0)
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
     }

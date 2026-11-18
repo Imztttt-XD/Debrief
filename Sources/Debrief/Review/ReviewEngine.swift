@@ -1,4 +1,5 @@
 import Foundation
+import RecorderCore
 
 /// Runs the review pipeline for a recording: transcribe → extract questions → critique →
 /// summarize. Each finished step is saved immediately, so a failure (or quitting) part-way
@@ -8,6 +9,9 @@ final class ReviewEngine: ObservableObject {
     enum Phase: Equatable {
         case reading
         case transcribing(Int, Int)
+        /// On-device transcription, percent done.
+        case transcribingLocally(Int)
+        case separatingSpeakers
         case extracting
         case critiquing(Int, Int)
         case summarizing
@@ -16,6 +20,8 @@ final class ReviewEngine: ObservableObject {
             switch self {
             case .reading: L10n.tr("review.phase.reading")
             case .transcribing(let d, let t): L10n.tr("review.phase.transcribing", [String(d), String(t)])
+            case .transcribingLocally(let p): L10n.tr("review.phase.transcribingLocal", [String(p)])
+            case .separatingSpeakers: L10n.tr("review.phase.separatingSpeakers")
             case .extracting: L10n.tr("review.phase.extracting")
             case .critiquing(let d, let t): L10n.tr("review.phase.critiquing", [String(d), String(t)])
             case .summarizing: L10n.tr("review.phase.summarizing")
@@ -25,6 +31,7 @@ final class ReviewEngine: ObservableObject {
         var fraction: Double? {
             switch self {
             case .transcribing(let d, let t), .critiquing(let d, let t): t > 0 ? Double(d) / Double(t) : nil
+            case .transcribingLocally(let p): Double(p) / 100
             default: nil
             }
         }
@@ -46,7 +53,11 @@ final class ReviewEngine: ObservableObject {
         launch(recordingID, transcribe: !hasTranscript, analyze: true)
     }
 
-    func retranscribe(_ recordingID: UUID) { launch(recordingID, transcribe: true, analyze: true) }
+    func retranscribe(_ recordingID: UUID) {
+        // Starting over: don't reuse segments from an earlier run.
+        store.updateReview(recordingID) { $0.transcriptCache = nil }
+        launch(recordingID, transcribe: true, analyze: true)
+    }
     func reanalyze(_ recordingID: UUID) { launch(recordingID, transcribe: false, analyze: true) }
 
     func cancel(_ recordingID: UUID) {
@@ -73,17 +84,15 @@ final class ReviewEngine: ObservableObject {
 
         do {
             if transcribe {
-                let (client, model) = try settings.client(for: .transcription)
-                let transcriber = Transcriber(client: client, model: model,
-                                              context: Transcriber.context(company: context.company, role: context.role,
-                                                                           jd: context.jobDescription, resume: context.resume))
-                let utterances = try await transcriber.transcribe(record) { [weak self] done, total in
-                    Task { @MainActor in self?.running[id] = .transcribing(done, total) }
-                }
+                var (utterances, model) = try await transcribeRecording(record, id: id, settings: settings, context: context)
+                try Task.checkCancellation()
+                let estimated = await separateSpeakers(&utterances, record: record, id: id)
                 try Task.checkCancellation()
                 store.updateReview(id) {
                     $0.transcript = utterances
                     $0.transcriptModel = model
+                    $0.speakersEstimated = estimated ? true : nil
+                    $0.transcriptCache = nil
                     $0.transcriptEdited = false
                     $0.questions = []
                     $0.summary = nil
@@ -128,8 +137,59 @@ final class ReviewEngine: ObservableObject {
         } catch {
             // Cancelling also surfaces as a URLSession error; don't report it as a failure.
             if Task.isCancelled || error is CancellationError { return }
-            store.updateReview(id) { $0.lastError = error.localizedDescription }
+            // Rate limited even after waiting: say what was kept and what to do.
+            let message = (error as? AIError)?.isRateLimit == true ? L10n.tr("review.error.rateLimited") : error.localizedDescription
+            store.updateReview(id) { $0.lastError = message }
         }
+    }
+
+    /// UserDefaults key of the 实验功能 switch in 设置 → 通用.
+    static let speakerSeparationKey = "experimentalSpeakerSeparation"
+
+    /// Experimental: a single-track recording (every line 未知) gets its speakers from
+    /// SpeakerSeparation. Any failure leaves the lines as they were: the review still works,
+    /// just without speakers. Returns whether speakers were assigned.
+    private func separateSpeakers(_ utterances: inout [Utterance], record: RecordingRecord, id: UUID) async -> Bool {
+        guard UserDefaults.standard.bool(forKey: Self.speakerSeparationKey), SpeakerSeparation.isReady,
+              !utterances.isEmpty, utterances.allSatisfy({ $0.speaker == .unknown }) else { return false }
+        running[id] = .separatingSpeakers
+        do {
+            let (file, _) = try await Transcriber.sources(for: record)
+            let track = try await SpeechSegmenter.readTrack(url: file, index: 0)
+            let turns = try await SpeakerSeparation.diarize(track)
+            let labeled = SpeakerSeparation.assign(utterances, turns: turns)
+            guard labeled != utterances else { return false }
+            utterances = labeled
+            return true
+        } catch {
+            NSLog("Debrief: speaker separation failed: \(error)")
+            return false
+        }
+    }
+
+    /// On this Mac (macOS 26+, no key) or with the cloud model, per the settings.
+    private func transcribeRecording(_ record: RecordingRecord, id: UUID, settings: AISettings,
+                                     context: InterviewContext) async throws -> ([Utterance], String) {
+        if settings.usesLocalTranscription, #available(macOS 26, *) {
+            let terms = [context.company, context.role].filter { !$0.isEmpty }
+                + Transcriber.terms(jd: context.jobDescription, resume: context.resume)
+            running[id] = .transcribingLocally(0)
+            let (utterances, locale) = try await LocalTranscriber.transcribe(record, terms: terms) { [weak self] fraction in
+                Task { @MainActor in self?.running[id] = .transcribingLocally(Int(fraction * 100)) }
+            }
+            return (utterances, LocalTranscriber.modelName(locale))
+        }
+        let (client, model) = try settings.client(for: .transcription)
+        let transcriber = Transcriber(client: client, model: model,
+                                      context: Transcriber.context(company: context.company, role: context.role,
+                                                                   jd: context.jobDescription, resume: context.resume))
+        let cached = store.review(for: id)?.transcriptCache ?? [:]
+        let utterances = try await transcriber.transcribe(record, cached: cached, onSegment: { [weak self] key, text in
+            Task { @MainActor in self?.store.updateReview(id) { $0.transcriptCache = ($0.transcriptCache ?? [:]).merging([key: text]) { $1 } } }
+        }, progress: { [weak self] done, total in
+            Task { @MainActor in self?.running[id] = .transcribing(done, total) }
+        })
+        return (utterances, model)
     }
 
     private func interviewContext(for record: RecordingRecord) -> InterviewContext {

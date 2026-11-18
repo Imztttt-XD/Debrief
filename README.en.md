@@ -11,8 +11,8 @@ A macOS app for job seekers: record your interviews, get an AI review of every q
 ## What it does
 
 - **Record any online interview.** Zoom, Teams, Tencent Meeting, a browser tab: Debrief records the meeting audio and your microphone on separate tracks. A small floating button sits above the meeting window and stays out of screen sharing. If the app crashes or the Mac sleeps, the recording is saved.
-- **Review.** The recording is transcribed with the speakers told apart (interviewer / you). An AI model then finds every question and follow-up, scores your answer (accuracy, structure, depth), points out factual mistakes, and writes a better answer using only your real experience from your resume. Click any question to hear that moment.
-- **Question bank.** Questions from every review collect in one place. Repeats are merged and counted ("asked ×3"), and each one is marked 已掌握 / 需复习 from your latest answer.
+- **Review.** The recording is transcribed with the speakers told apart (interviewer / you). An AI model then finds every question and follow-up, scores your answer (accuracy, structure, depth), points out factual mistakes, and writes a better answer using only your real experience from your resume. Click any question to hear that moment. Recordings made elsewhere (a phone, a meeting app’s audio or video export) can be imported and reviewed too; for such single-track recordings, the experimental "tell speakers apart" setting separates the voices on your Mac.
+- **Question bank and daily review.** Questions from every review collect in one place, and repeats are merged and counted ("asked ×3"). A question you answered poorly comes back the next day; one you answered well comes back after a growing gap (3, 7, 14, 30, 60 days). The bank shows "N due today": answer them one by one, get instant feedback, and every score is kept.
 - **Mock interviews.** An AI interviewer asks questions based on the job description, your resume and the real questions you've been asked before, follows up like a real interviewer, then reviews you the same way.
 - **Applications and schedule.** Keep track of companies, roles, JDs and resume versions. Schedule rounds with reminders; the reminder has a 开始录音 button that starts recording linked to that interview.
 
@@ -34,19 +34,19 @@ Prefer to build it yourself? See [ARCHITECTURE.md](ARCHITECTURE.md#build-run-tes
 
 ## Set up the AI models
 
-Reviews and mock interviews need API keys. Open **设置 → 模型服务**:
+Open **设置 → 模型服务**:
 
-- **Transcription:** Alibaba Cloud Model Studio (`qwen3-asr-flash`).
+- **Transcription:** on macOS 26 and later it runs **on this Mac** by default (Apple's built-in speech recognizer): free, no API key, and the recording never leaves your Mac. The language model downloads on first use. English terms in mixed Chinese–English speech are often misrecognized; if that matters, switch to the **cloud model**, Alibaba Cloud Model Studio (`qwen3-asr-flash`).
 - **Review, mock interviews, question bank:** DeepSeek by default. Any OpenAI-compatible service works (OpenAI, a local Ollama, …), and each feature can use a different model.
 
 Press **Test** next to each one to check the key with one tiny real request. Keys are stored in your macOS Keychain.
 
-Recording, the schedule, applications and the question bank work without any key.
+Review analysis, question-bank practice and mock interviews need an API key for a text model. Recording, transcription (on this Mac), the schedule, applications and the question bank work without any key.
 
 ## Privacy
 
 - Recordings stay on your Mac in `~/Movies/Debrief/`. All other data is in `~/Library/Application Support/Debrief/`.
-- When you start a review, the speech segments of that recording are sent to your transcription provider, and the transcript plus the job description and resume go to your review model. Mock interviews send the job description, resume and your typed answers to the mock-interview model. Silence is never uploaded. Nothing is sent anywhere else, and there are no analytics.
+- When you start a review, on-device transcription stays on your Mac; with a cloud model, the speech segments of that recording are sent to your transcription provider. The transcript plus the job description and resume go to your review model; question-bank practice sends the question, your answer, the job description and resume to the review model. Mock interviews send the job description, resume and your typed answers to the mock-interview model. Silence is never uploaded. Nothing is sent anywhere else, and there are no analytics.
 - **Only record with consent.** Recording people without their consent is illegal in many places. Debrief asks you to confirm this before your first recording.
 
 ## Floating button
